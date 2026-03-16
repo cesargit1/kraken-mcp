@@ -5,6 +5,7 @@ Handles: Grok-4 client, kraken-cli execution, tool dispatch, mode switching (pap
 
 import os
 import json
+import shutil
 import subprocess
 import threading
 import time
@@ -24,7 +25,8 @@ class Mode(str, Enum):
     LIVE  = "live"
 
 MODE = Mode(os.getenv("TRADING_MODE", "paper"))
-KRAKEN_BIN = os.path.expanduser("~/.cargo/bin/kraken")
+_default_bin = os.path.expanduser("~/.cargo/bin/kraken")
+KRAKEN_BIN = _default_bin if os.path.isfile(_default_bin) else (shutil.which("kraken") or _default_bin)
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +116,8 @@ def _run_kraken_once(args: list[str]) -> dict:
 
 def run_kraken(args: list[str]) -> dict:
     """Execute a kraken-cli command with retries."""
+    if not os.path.isfile(KRAKEN_BIN):
+        return {"error": f"kraken not found at {KRAKEN_BIN}"}
     return retry_call(
         _run_kraken_once, args,
         is_error=lambda r: isinstance(r, dict) and "error" in r,
