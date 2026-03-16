@@ -1,5 +1,5 @@
 [phases.install]
 cmds = [
   "pip install -r requirements.txt",
-  "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/krakenfx/kraken-cli/releases/latest/download/kraken-cli-installer.sh | sh"
+  "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/krakenfx/kraken-cli/releases/latest/download/kraken-cli-installer.sh | sh && ln -sf /root/.cargo/bin/kraken /usr/local/bin/kraken"
 ]
