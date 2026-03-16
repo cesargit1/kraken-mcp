@@ -68,14 +68,22 @@ _KRAKEN_LOCK  = threading.Semaphore(3)
 _KRAKEN_DELAY = 0.2  # seconds between calls
 
 # ---------------------------------------------------------------------------
-# Grok-4 client
+# Grok-4 client (lazy — created on first use so missing key only fails at
+# AI call time, not at import/startup)
 # ---------------------------------------------------------------------------
 
-client = OpenAI(
-    api_key=os.getenv("XAI_API_KEY"),
-    base_url="https://api.x.ai/v1",
-)
+_client: OpenAI | None = None
 MODEL = "grok-4-latest"
+
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        api_key = os.getenv("XAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("XAI_API_KEY environment variable is not set")
+        _client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+    return _client
 
 # ---------------------------------------------------------------------------
 # kraken-cli runner
@@ -338,7 +346,7 @@ def search_x(query: str) -> str:
     Returns a text summary. Use this to gather X sentiment before calling run_agent.
     """
     def _call():
-        response = client.responses.create(
+        response = _get_client().responses.create(
             model=MODEL,
             input=[{"role": "user", "content": query}],
             tools=[{"type": "x_search"}],
@@ -352,7 +360,7 @@ def search_x_stream(query: str):
     Streaming version of search_x. Yields text delta strings as they arrive.
     Caller should collect them; the final full text is the concatenation of all deltas.
     """
-    with client.responses.stream(
+    with _get_client().responses.stream(
         model=MODEL,
         input=[{"role": "user", "content": query}],
         tools=[{"type": "x_search"}],
@@ -376,7 +384,7 @@ def run_analyst(system_prompt: str, context: dict, model: str = MODEL) -> dict:
     Retries on API errors and JSON parse failures.
     """
     def _call():
-        response = client.chat.completions.create(
+        response = _get_client().chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -421,7 +429,7 @@ def run_agent(system_prompt: str, user_prompt: str, mode: Mode = MODE, verbose: 
     ]
 
     while True:
-        response = client.chat.completions.create(
+        response = _get_client().chat.completions.create(
             model=model,
             messages=messages,
             tools=TOOLS,
