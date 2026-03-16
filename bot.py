@@ -465,6 +465,24 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
 
 
 # ---------------------------------------------------------------------------
+# Market hours helper
+# ---------------------------------------------------------------------------
+
+def is_market_open(asset_class: str) -> bool:
+    """Return True if the relevant market is open.
+    Crypto (spot) trades 24/7.  Tokenized assets follow NYSE hours Mon-Fri 09:30-16:00 ET."""
+    if asset_class in ("spot", "", None):
+        return True
+    from zoneinfo import ZoneInfo
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    if now_et.weekday() >= 5:          # Saturday=5, Sunday=6
+        return False
+    market_open  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+    market_close = now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return market_open <= now_et <= market_close
+
+
+# ---------------------------------------------------------------------------
 # Per-ticker fast-loop worker (runs concurrently for all watchlist tickers)
 # ---------------------------------------------------------------------------
 
@@ -562,11 +580,17 @@ async def _process_one_ticker(ticker_row: dict) -> None:
                     update_ticker_state(ticker, stage="stop_loss", current_price=current_price)
                     await close_position_stop_loss(ticker_row, open_pos, current_price)
 
-        # 5. Collect all threshold flags
+        # 5. Market hours gate — skip AI for tokenized assets when exchange is closed
+        if not is_market_open(asset_class):
+            print(f"  [skip] {ticker}: market closed for {asset_class} — skipping AI pipeline")
+            update_ticker_state(ticker, status="skipped", stage="complete", skip_reason="market closed")
+            return
+
+        # 6. Collect all threshold flags
         flags = ind.any_flags(all_indicators)
         update_ticker_state(ticker, stage="flag_check", flags=flags, current_price=current_price)
 
-        # 6. Fetch last AI run + all cooldown states in parallel
+        # 7. Fetch last AI run + all cooldown states in parallel
         results = await asyncio.gather(
             loop.run_in_executor(None, lambda: db.get_last_ai_run(ticker)),
             *[loop.run_in_executor(None, lambda f=f: db.check_cooldown(ticker, f, COOLDOWN_MIN))
@@ -581,7 +605,7 @@ async def _process_one_ticker(ticker_row: dict) -> None:
         )
         active_flags = [f for f, on_cd in zip(flags, cooldown_hits) if not on_cd]
 
-        # 7. Trigger AI if there are new flags or timer expired
+        # 8. Trigger AI if there are new flags or timer expired
         if active_flags or timer_expired:
             update_ticker_state(ticker, stage="ai_pipeline", active_flags=active_flags, timer_expired=timer_expired)
             await process_ticker(ticker_row, active_flags, all_indicators, timer_driven=timer_expired)
