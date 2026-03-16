@@ -32,12 +32,31 @@ def reset_client() -> None:
     _client = None
 
 
+def _is_conn_err(e: Exception) -> bool:
+    s = f"{type(e)} {e}"
+    return any(x in s for x in (
+        "RemoteProtocolError", "ReadError", "ConnectionTerminated",
+        "ConnectError", "Errno 35", "ConnectTimeout",
+    ))
+
+
+def _exec(fn):
+    """Run a Supabase query lambda, resetting the client and retrying once on HTTP/2 drops."""
+    try:
+        return fn()
+    except Exception as e:
+        if _is_conn_err(e):
+            reset_client()
+            return fn()
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Watchlist
 # ---------------------------------------------------------------------------
 
 def get_watchlist() -> list[dict]:
-    r = get_client().table("watchlist").select("*").eq("active", True).execute()
+    r = _exec(lambda: get_client().table("watchlist").select("*").eq("active", True).execute())
     return r.data
 
 
@@ -47,12 +66,12 @@ def get_watchlist() -> list[dict]:
 
 def upsert_candles(rows: list[dict]) -> None:
     if rows:
-        get_client().table("candles").upsert(rows, on_conflict="ticker,timeframe,ts").execute()
+        _exec(lambda: get_client().table("candles").upsert(rows, on_conflict="ticker,timeframe,ts").execute())
 
 
 def get_candle_window(ticker: str, timeframe: str, limit: int = 100) -> list[dict]:
     """Return the most recent N candles in chronological order."""
-    r = (
+    r = _exec(lambda: (
         get_client().table("candles")
         .select("*")
         .eq("ticker", ticker)
@@ -60,12 +79,12 @@ def get_candle_window(ticker: str, timeframe: str, limit: int = 100) -> list[dic
         .order("ts", desc=True)
         .limit(limit)
         .execute()
-    )
+    ))
     return list(reversed(r.data))
 
 
 def get_latest_candle_ts(ticker: str, timeframe: str) -> Optional[str]:
-    r = (
+    r = _exec(lambda: (
         get_client().table("candles")
         .select("ts")
         .eq("ticker", ticker)
@@ -73,7 +92,7 @@ def get_latest_candle_ts(ticker: str, timeframe: str) -> Optional[str]:
         .order("ts", desc=True)
         .limit(1)
         .execute()
-    )
+    ))
     return r.data[0]["ts"] if r.data else None
 
 
@@ -85,7 +104,7 @@ _EPHEMERAL_INDICATOR_KEYS = {"latest_close", "latest_open", "latest_high", "late
 
 def upsert_indicators(row: dict) -> None:
     db_row = {k: v for k, v in row.items() if k not in _EPHEMERAL_INDICATOR_KEYS}
-    get_client().table("indicators").upsert(db_row, on_conflict="ticker,timeframe,ts").execute()
+    _exec(lambda: get_client().table("indicators").upsert(db_row, on_conflict="ticker,timeframe,ts").execute())
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +348,7 @@ def get_recent_transactions(limit: int = 30) -> list[dict]:
 
 def get_all_watchlist_tickers() -> list[dict]:
     """Return all watchlist rows including inactive ones."""
-    r = get_client().table("watchlist").select("*").execute()
+    r = _exec(lambda: get_client().table("watchlist").select("*").execute())
     return r.data or []
 
 
@@ -459,26 +478,26 @@ def close_position(ticker: str, close_price: float, close_reason: str) -> Option
 
 
 def get_open_position(ticker: str) -> Optional[dict]:
-    r = (
+    r = _exec(lambda: (
         get_client().table("positions")
         .select("*")
         .eq("ticker", ticker)
         .is_("closed_at", "null")
-        .order("opened_at", desc=False)   # oldest open row first (should only ever be one)
+        .order("opened_at", desc=False)
         .limit(1)
         .execute()
-    )
+    ))
     return r.data[0] if r.data else None
 
 
 def get_all_open_positions() -> list[dict]:
-    r = (
+    r = _exec(lambda: (
         get_client().table("positions")
         .select("*")
         .is_("closed_at", "null")
         .order("opened_at", desc=True)
         .execute()
-    )
+    ))
     return r.data or []
 
 
