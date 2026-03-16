@@ -26,6 +26,12 @@ def get_client() -> Client:
     return _client
 
 
+def reset_client() -> None:
+    """Drop the cached client so next call to get_client() creates a fresh one."""
+    global _client
+    _client = None
+
+
 # ---------------------------------------------------------------------------
 # Watchlist
 # ---------------------------------------------------------------------------
