@@ -338,12 +338,17 @@ async def api_positions():
 
     closed_positions = await loop.run_in_executor(None, lambda: db.get_closed_positions_full(50))
 
-    # Total fees = entry + exit fee on every closed position (already-paid costs only)
-    total_fees = sum(
+    # Total fees = entry fee on open positions + both sides on closed positions
+    open_entry_fees = sum(
+        db.calc_trade_fee((p.get("entry_price") or 0) * (p.get("quantity") or 0))
+        for p in open_positions
+    )
+    closed_fees = sum(
         db.calc_trade_fee((p.get("entry_price") or 0) * (p.get("quantity") or 0))
         + db.calc_trade_fee((p.get("close_price") or 0) * (p.get("quantity") or 0))
         for p in closed_positions
     )
+    total_fees = open_entry_fees + closed_fees
     # Margin cost = accrued interest on leveraged closed positions only
     total_margin_cost = sum((p.get("margin_cost") or 0) for p in closed_positions)
 
