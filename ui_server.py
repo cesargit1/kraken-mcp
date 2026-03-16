@@ -103,7 +103,7 @@ def sse(data: dict) -> str:
 
 _CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com; "
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
     "connect-src 'self'; "
     "img-src 'self' data:; "
