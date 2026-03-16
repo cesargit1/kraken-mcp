@@ -19,7 +19,9 @@ Usage:
 """
 
 import asyncio
+import json
 import os
+import urllib.request
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -46,19 +48,39 @@ COOLDOWN_MIN      = 30
 # Current price helper
 # ---------------------------------------------------------------------------
 
+def _fetch_price_http(pair: str) -> float | None:
+    """Fallback: fetch price directly from Kraken public REST API.
+    Used when kraken-cli binary is unavailable (e.g. Railway deployment)."""
+    try:
+        url = f"https://api.kraken.com/0/public/Ticker?pair={pair}"
+        req = urllib.request.Request(url, headers={"User-Agent": "kraken-mcp/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        if data.get("error"):
+            return None
+        for val in data.get("result", {}).values():
+            if isinstance(val, dict) and "c" in val:
+                return float(val["c"][0])
+    except Exception:
+        pass
+    return None
+
+
 def get_current_price(pair: str, asset_class: str) -> float | None:
     args = ["ticker", pair]
     # --asset-class only accepts tokenized_asset or forex; omit for spot/crypto
     if asset_class and asset_class not in ("spot", ""):
         args += ["--asset-class", asset_class]
     result = run_kraken(args)
-    for key, val in result.items():
-        if isinstance(val, dict) and "c" in val:
-            try:
-                return float(val["c"][0])
-            except (KeyError, IndexError, TypeError):
-                pass
-    return None
+    if "error" not in result:
+        for key, val in result.items():
+            if isinstance(val, dict) and "c" in val:
+                try:
+                    return float(val["c"][0])
+                except (KeyError, IndexError, TypeError):
+                    pass
+    # CLI unavailable or returned an error — fall back to REST API
+    return _fetch_price_http(pair)
 
 
 # ---------------------------------------------------------------------------
