@@ -339,8 +339,9 @@ async def api_positions():
     closed_positions = await loop.run_in_executor(None, lambda: db.get_closed_positions_full(50))
 
     # Total fees = entry fee on open positions + both sides on closed positions
+    # Note: open_positions uses "volume" key (renamed from DB "quantity" during construction above)
     open_entry_fees = sum(
-        db.calc_trade_fee((p.get("entry_price") or 0) * (p.get("quantity") or 0))
+        db.calc_trade_fee((p.get("entry_price") or 0) * (p.get("volume") or 0))
         for p in open_positions
     )
     closed_fees = sum(
