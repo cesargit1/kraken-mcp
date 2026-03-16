@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from core import run_kraken, search_x, dispatch_tool, Mode, MODE
+from core import run_kraken, search_x, dispatch_tool, Mode, MODE, build_x_query
 import db
 import fetch as fetcher
 import indicators as ind
@@ -47,7 +47,11 @@ COOLDOWN_MIN      = 30
 # ---------------------------------------------------------------------------
 
 def get_current_price(pair: str, asset_class: str) -> float | None:
-    result = run_kraken(["ticker", pair, "--asset-class", asset_class])
+    args = ["ticker", pair]
+    # --asset-class only accepts tokenized_asset or forex; omit for spot/crypto
+    if asset_class and asset_class not in ("spot", ""):
+        args += ["--asset-class", asset_class]
+    result = run_kraken(args)
     for key, val in result.items():
         if isinstance(val, dict) and "c" in val:
             try:
@@ -66,9 +70,9 @@ async def close_position_stop_loss(
 ) -> None:
     ticker      = ticker_row["ticker"]
     pair        = ticker_row.get("pair", ticker)
-    asset_class = ticker_row.get("asset_class", "tokenized_asset")
+    asset_class = ticker_row.get("asset_class", "spot")
     side        = position["side"]
-    volume      = position["volume"]
+    volume      = position["quantity"]
     leverage    = position.get("leverage", 1)
 
     print(f"  [STOP-LOSS] {ticker} {side.upper()} @ ${current_price:.2f}  "
@@ -90,8 +94,41 @@ async def close_position_stop_loss(
         exec_result = {"raw": raw, "volume": volume, "price": current_price}
 
     closed = db.close_position(ticker, current_price, "stop_loss")
-    pnl = closed.get("pnl", 0) if closed else 0
+    pnl = closed.get("realized_pnl", 0) if closed else 0
     print(f"  [STOP-LOSS] Closed {ticker}. P&L: ${pnl:.2f}")
+
+    # Log to agent_log (action=sell/cover, trigger=stop_loss) so history is complete
+    close_action = "sell" if side == "long" else "cover"
+    agent_log_id = db.log_agent_run(
+        ticker=ticker,
+        action=close_action,
+        technical={},
+        social={},
+        risk={},
+        decision_reasoning=f"Stop-loss triggered. {side.upper()} position closed at ${current_price:.2f} (stop was ${position.get('stop_loss', 0):.2f}). P&L: ${pnl:.2f}",
+        pair=ticker_row.get("pair"),
+        trigger_flags="stop_loss",
+        position_side=side,
+        executed=True,
+    )
+    # Log the close transaction to ledger for financial audit trail
+    _close_notional = round(volume * current_price, 2)
+    db.log_transaction(
+        agent_log_id=agent_log_id,
+        ticker=ticker,
+        action=close_action,
+        current_price=current_price,
+        volume=volume,
+        notional_usd=_close_notional,
+        leverage=leverage,
+        stop_loss=None,
+        fee=db.calc_trade_fee(_close_notional),
+        pair=ticker_row.get("pair"),
+        order_type="market",
+        source_type="paper" if MODE == Mode.PAPER else "spot",
+        is_simulated=exec_result.get("simulated", False),
+        execution_result=exec_result,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +137,7 @@ async def close_position_stop_loss(
 
 async def execute_trade(ticker_row: dict, decision: dict, current_price: float) -> dict:
     pair        = ticker_row.get("pair", ticker_row["ticker"])
-    asset_class = ticker_row.get("asset_class", "tokenized_asset")
+    asset_class = ticker_row.get("asset_class", "spot")
     action      = decision["action"]
     size_usd    = decision.get("size_usd") or 0
     leverage    = decision.get("leverage", 1)
@@ -111,7 +148,7 @@ async def execute_trade(ticker_row: dict, decision: dict, current_price: float) 
     if action in ("cover", "sell"):
         open_pos = db.get_open_position(ticker_row["ticker"])
         if open_pos:
-            volume = open_pos["volume"]
+            volume = open_pos["quantity"]
             leverage = open_pos.get("leverage", 1)
 
     if volume <= 0:
@@ -143,16 +180,19 @@ async def execute_trade(ticker_row: dict, decision: dict, current_price: float) 
     }
     if leverage > 1:
         args["leverage"] = leverage
-    # reduce_only only for closing an existing long (plain "sell", no leverage)
-    if action == "sell" and leverage <= 1:
-        args["reduce_only"] = False  # closing long spot
+    # reduce_only for closing existing margin positions (prevents opening new opposite side)
+    if action in ("sell", "cover") and leverage > 1:
+        args["reduce_only"] = True
 
     loop = asyncio.get_event_loop()
 
     if action == "buy":
         raw = await loop.run_in_executor(None, lambda: dispatch_tool("buy", args, MODE))
-    elif action in ("sell", "short", "cover"):
+    elif action in ("sell", "short"):
         raw = await loop.run_in_executor(None, lambda: dispatch_tool("sell", args, MODE))
+    elif action == "cover":
+        # Cover a short = buy back the shares
+        raw = await loop.run_in_executor(None, lambda: dispatch_tool("buy", args, MODE))
     else:
         return {"skipped": "hold"}
 
@@ -164,20 +204,25 @@ async def execute_trade(ticker_row: dict, decision: dict, current_price: float) 
 # Per-ticker AI pipeline
 # ---------------------------------------------------------------------------
 
-async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dict) -> None:
+async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dict, timer_driven: bool = False) -> None:
     ticker      = ticker_row["ticker"]
     pair        = ticker_row.get("pair", ticker)
-    asset_class = ticker_row.get("asset_class", "tokenized_asset")
+    asset_class = ticker_row.get("asset_class", "spot")
 
-    print(f"\n  [AI ▶] {ticker}  flags={flags or ['timer']}")
+    trigger_label = ",".join(flags) if flags else ""
+    if timer_driven:
+        trigger_label = (trigger_label + ",timer") if trigger_label else "timer"
+
+    print(f"\n  [AI ▶] {ticker}  trigger={trigger_label}")
+    # Stamp last_ai_run + set flag cooldowns immediately — prevents re-triggering
+    # if the next poll cycle starts while this slow LLM pipeline is still running.
+    db.stamp_ai_run_started(ticker)
+    for flag in flags:
+        db.set_cooldown(ticker, flag)
     update_ticker_state(ticker, stage="context_fetch")
 
     # Prepare query strings before parallel fetch
-    clean_ticker = ticker.replace("x", "")  # "NVDAx" → "NVDA"
-    x_query = (
-        f"Search X for posts about ${clean_ticker} stock ticker in the last hour. "
-        "Include post texts, volume trends, and any notable news or sentiment."
-    )
+    x_query = build_x_query(ticker_row)
     balance_cmd = ["paper", "balance"] if MODE == Mode.PAPER else ["balance"]
 
     # Fetch all context in parallel (~3-5s wall time instead of ~15s sequential)
@@ -224,6 +269,17 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
     print(f"  [AI]  Social    : {social.get('signal','?')} ({social.get('confidence','?')}%) — hype={social.get('hype_vs_real','?')}")
     print(f"  [AI]  Risk      : max ${risk.get('max_position_usd','?')} lev={risk.get('recommended_leverage','?')}x")
 
+    # Guard: abort pipeline if any specialist returned a parse/API error
+    failed = []
+    for name, result in [("technical", technical), ("social", social), ("risk", risk)]:
+        if isinstance(result, dict) and "error" in result:
+            failed.append(f"{name}: {result['error']}")
+    if failed:
+        print(f"  [ABORT] {ticker}: specialist errors — {'; '.join(failed)}")
+        update_ticker_state(ticker, status="error", error=f"specialist_failure: {'; '.join(failed)}")
+        db.update_signal_state(ticker, {"action": "hold"}, trigger_label)
+        return
+
     # Store specialist results in state for dashboard
     update_ticker_state(ticker,
         specialist_technical=technical,
@@ -235,7 +291,7 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
     decision_context = {
         "ticker":              ticker,
         "current_price":       current_price,
-        "open_position":       open_position,   # None if flat, else {side, volume, entry_price, stop_loss, leverage}
+        "open_position":       open_position,   # None if flat, else {side, quantity, entry_price, stop_loss, leverage}
         "current_holdings":    holdings,
         "technical_analysis":  technical,
         "social_analysis":     social,
@@ -267,30 +323,41 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
     print(f"  [AI ◀] {ticker} → {action.upper()} (confidence={decision.get('confidence','?')}%)")
     print(f"         {decision.get('reasoning','')[:140]}")
 
-    # Log full analysis chain to Supabase
-    trade_id = db.log_trade(
+    size_usd = decision.get("size_usd") or 0
+
+    # Log AI decision session to Supabase (no financials — those go to transaction_ledger)
+    agent_log_id = db.log_agent_run(
         ticker=ticker,
         action=action,
-        size=decision.get("size_usd") or 0,
-        leverage=decision.get("leverage", 1),
-        stop_loss=decision.get("stop_loss") or 0,
-        entry_price=current_price or 0,
         technical=technical,
         social=social,
         risk=risk,
         decision_reasoning=decision.get("reasoning", ""),
+        decision_json=decision,
+        pair=ticker_row.get("pair"),
+        trigger_flags=trigger_label,
+        position_side=open_position.get("side") if open_position else "flat",
+        indicators_snapshot=all_indicators,
         executed=False,
     )
 
     # Execute if not hold
-    if action != "hold" and current_price and decision.get("size_usd"):
+    is_entry = action in ("buy", "short")
+    is_exit  = action in ("sell", "cover")
+    if action == "hold":
+        pass  # nothing to do
+    elif is_entry and not decision.get("size_usd"):
+        print(f"  [SKIP] {ticker}: action={action} but AI returned null size_usd — not executing. Check decision agent prompt.")
+    elif not current_price:
+        print(f"  [SKIP] {ticker}: no current price — not executing.")
+    else:
         # ── Enforce settings hard limits before execution ─────────────────
         if action in ("buy", "short"):
             # -- Max open positions guard --
             open_positions = db.get_all_open_positions()
             if len(open_positions) >= settings.get("max_open_positions", 10):
                 print(f"  [LIMIT] {ticker}: max_open_positions ({settings['max_open_positions']}) reached. Skipping.")
-                db.update_signal_state(ticker, decision, ",".join(flags) if flags else "timer")
+                db.update_signal_state(ticker, decision, trigger_label)
                 for flag in flags:
                     db.set_cooldown(ticker, flag)
                 return
@@ -312,7 +379,7 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
 
             # -- Cash check: block if not enough margin available --
             used_margin    = sum(
-                ((p["entry_price"] or 0) * (p["volume"] or 0)) / max(p["leverage"] or 1, 1)
+                ((p["entry_price"] or 0) * (p["quantity"] or 0)) / max(p["leverage"] or 1, 1)
                 for p in open_positions
             )
             realized       = db.get_realized_pnl()
@@ -320,33 +387,50 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
             required_margin = (decision.get("size_usd") or 0) / max(decision.get("leverage", 1), 1)
             if required_margin > available_cash:
                 print(f"  [CASH] {ticker}: insufficient cash — need ${required_margin:,.0f}, have ${available_cash:,.0f}. Skipping.")
-                db.update_signal_state(ticker, decision, ",".join(flags) if flags else "timer")
+                db.update_signal_state(ticker, decision, trigger_label)
                 for flag in flags:
                     db.set_cooldown(ticker, flag)
                 return
         result = await execute_trade(ticker_row, decision, current_price)
-        db.mark_trade_executed(trade_id, result)
+        # Record the exchange transaction receipt in transaction_ledger
+        exec_volume = result.get("volume") or round(size_usd / (current_price or 1), 4)
+        _exec_notional = round(exec_volume * (current_price or 0), 2)
+        db.log_transaction(
+            agent_log_id=agent_log_id,
+            ticker=ticker,
+            action=action,
+            current_price=current_price or 0,
+            volume=exec_volume,
+            notional_usd=_exec_notional,
+            leverage=decision.get("leverage", 1),
+            stop_loss=decision.get("stop_loss"),
+            fee=db.calc_trade_fee(_exec_notional),
+            pair=ticker_row.get("pair"),
+            order_type="market",
+            source_type="paper" if MODE == Mode.PAPER else "spot",
+            is_simulated=result.get("simulated", False),
+            execution_result=result,
+        )
+        db.mark_agent_run_executed(agent_log_id)
         # Record open position (buy = long, short = short)
         if action in ("buy", "short") and not result.get("error"):
             stop_price = decision.get("stop_loss")
-            volume = result.get("volume") or round(
-                (decision.get("size_usd") or 0) / (current_price or 1), 4
-            )
+            volume = exec_volume
             db.open_position(
                 ticker=ticker,
                 side="long" if action == "buy" else "short",
-                volume=volume,
+                quantity=volume,
                 entry_price=current_price,
                 stop_loss=stop_price,
                 leverage=decision.get("leverage", 1),
-                trade_log_id=trade_id,
+                agent_log_id=agent_log_id,
             )
         # Close position on sell/cover
         elif action in ("sell", "cover") and not result.get("error"):
             db.close_position(ticker, current_price, "ai_signal")
 
     # Persist signal state + set per-event cooldowns
-    db.update_signal_state(ticker, decision, ",".join(flags) if flags else "timer")
+    db.update_signal_state(ticker, decision, trigger_label)
     for flag in flags:
         db.set_cooldown(ticker, flag)
     update_ticker_state(ticker, status="done", stage="complete",
@@ -408,17 +492,45 @@ async def _process_one_ticker(ticker_row: dict) -> None:
         # 3. Fetch current price + open position in parallel for stop-loss check
         update_ticker_state(ticker, stage="price_check")
         pair        = ticker_row.get("pair", ticker)
-        asset_class = ticker_row.get("asset_class", "tokenized_asset")
+        asset_class = ticker_row.get("asset_class", "spot")
         current_price, open_pos = await asyncio.gather(
             loop.run_in_executor(None, lambda: get_current_price(pair, asset_class)),
             loop.run_in_executor(None, lambda: db.get_open_position(ticker)),
         )
         update_ticker_state(ticker, open_position=open_pos)
 
-        # 4. Stop-loss check (no AI — immediate close if breached)
+        # 4. Stop-loss check + trailing stop update (no AI — immediate / mechanical)
         if open_pos and current_price:
             sl   = open_pos.get("stop_loss")
             side = open_pos.get("side")
+
+            # --- Trailing stop: ratchet stop-loss toward price using ATR ---
+            atr_1h = (all_indicators.get("1h") or {}).get("atr")
+            if atr_1h and sl:
+                hw = open_pos.get("high_water_price") or open_pos.get("entry_price", 0)
+                settings = await loop.run_in_executor(None, db.get_settings)
+                atr_mult = settings.get("trailing_stop_atr_mult", 2.0)
+
+                if side == "long" and current_price > hw:
+                    new_stop = current_price - atr_mult * atr_1h
+                    if new_stop > sl:
+                        print(f"  [TRAIL] {ticker} LONG: stop ${sl:.2f} → ${new_stop:.2f}  (hw ${hw:.2f} → ${current_price:.2f})")
+                        await loop.run_in_executor(None, lambda: db.update_trailing_stop(ticker, current_price, new_stop))
+                        sl = new_stop  # use updated stop for breach check below
+                    else:
+                        # New high-water but stop didn't tighten (ATR too wide) — still record the high
+                        await loop.run_in_executor(None, lambda: db.update_trailing_stop(ticker, current_price, sl))
+
+                elif side == "short" and current_price < hw:
+                    new_stop = current_price + atr_mult * atr_1h
+                    if new_stop < sl:
+                        print(f"  [TRAIL] {ticker} SHORT: stop ${sl:.2f} → ${new_stop:.2f}  (hw ${hw:.2f} → ${current_price:.2f})")
+                        await loop.run_in_executor(None, lambda: db.update_trailing_stop(ticker, current_price, new_stop))
+                        sl = new_stop
+                    else:
+                        await loop.run_in_executor(None, lambda: db.update_trailing_stop(ticker, current_price, sl))
+
+            # --- Breach check (uses updated trailing stop if it was ratcheted) ---
             if sl:
                 breached = (
                     (side == "long"  and current_price <= sl) or
@@ -450,7 +562,7 @@ async def _process_one_ticker(ticker_row: dict) -> None:
         # 7. Trigger AI if there are new flags or timer expired
         if active_flags or timer_expired:
             update_ticker_state(ticker, stage="ai_pipeline", active_flags=active_flags, timer_expired=timer_expired)
-            await process_ticker(ticker_row, active_flags, all_indicators)
+            await process_ticker(ticker_row, active_flags, all_indicators, timer_driven=timer_expired)
         else:
             skip_msg = f"no new flags, not yet due (last AI: {last_ai.strftime('%H:%M') if last_ai else 'never'})"
             print(f"  [skip] {ticker}: {skip_msg}")

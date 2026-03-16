@@ -11,6 +11,7 @@ import time
 from enum import Enum
 from openai import OpenAI
 from dotenv import load_dotenv
+from retry import retry_call
 
 load_dotenv()
 
@@ -24,6 +25,40 @@ class Mode(str, Enum):
 
 MODE = Mode(os.getenv("TRADING_MODE", "paper"))
 KRAKEN_BIN = os.path.expanduser("~/.cargo/bin/kraken")
+
+
+# ---------------------------------------------------------------------------
+# Ticker helpers (used by bot.py and ui_server.py)
+# ---------------------------------------------------------------------------
+
+def get_search_name(ticker_row: dict) -> str:
+    """Human-readable name for social media search queries.
+    Uses the explicit search_name column if set, otherwise derives from ticker."""
+    name = ticker_row.get("search_name")
+    if name:
+        return name
+    # Fallback: strip 'x' suffix for xStocks, use ticker as-is otherwise
+    ticker = ticker_row["ticker"]
+    source = ticker_row.get("source", "")
+    if "xstock" in source:
+        return ticker.removesuffix("x")
+    return ticker
+
+
+def build_x_query(ticker_row: dict) -> str:
+    """Build an X search query appropriate to the asset type."""
+    name = get_search_name(ticker_row)
+    source = ticker_row.get("source", "")
+    if "crypto" in source:
+        return (
+            f"Search X for posts about ${name} cryptocurrency in the last hour. "
+            "Include post texts, volume trends, and any notable news or sentiment."
+        )
+    return (
+        f"Search X for posts about ${name} stock in the last hour. "
+        "Include post texts, volume trends, and any notable news or sentiment."
+    )
+
 
 # Global rate limiter — caps concurrent Kraken CLI subprocesses across all
 # callers (candle fetches, price checks, balance calls, order execution).
@@ -46,8 +81,8 @@ MODEL = "grok-4-latest"
 # kraken-cli runner
 # ---------------------------------------------------------------------------
 
-def run_kraken(args: list[str]) -> dict:
-    """Execute a kraken-cli command and return parsed JSON."""
+def _run_kraken_once(args: list[str]) -> dict:
+    """Single attempt to execute a kraken-cli command. Returns parsed JSON."""
     with _KRAKEN_LOCK:
         time.sleep(_KRAKEN_DELAY)
         try:
@@ -67,6 +102,15 @@ def run_kraken(args: list[str]) -> dict:
             return {"error": f"kraken not found at {KRAKEN_BIN}"}
         except Exception as e:
             return {"error": str(e)}
+
+
+def run_kraken(args: list[str]) -> dict:
+    """Execute a kraken-cli command with retries."""
+    return retry_call(
+        _run_kraken_once, args,
+        is_error=lambda r: isinstance(r, dict) and "error" in r,
+        label="kraken",
+    )
 
 # ---------------------------------------------------------------------------
 # Unified tool dispatcher — paper or live
@@ -293,12 +337,14 @@ def search_x(query: str) -> str:
     Search X (Twitter) posts in real time using Grok's native x_search tool.
     Returns a text summary. Use this to gather X sentiment before calling run_agent.
     """
-    response = client.responses.create(
-        model=MODEL,
-        input=[{"role": "user", "content": query}],
-        tools=[{"type": "x_search"}],
-    )
-    return response.output_text
+    def _call():
+        response = client.responses.create(
+            model=MODEL,
+            input=[{"role": "user", "content": query}],
+            tools=[{"type": "x_search"}],
+        )
+        return response.output_text
+    return retry_call(_call, label="x_search")
 
 
 def search_x_stream(query: str):
@@ -327,26 +373,34 @@ def run_analyst(system_prompt: str, context: dict, model: str = MODEL) -> dict:
     """
     Single structured LLM call for a specialist analyst.
     Returns parsed JSON dict. No tool calls — context is pre-built.
+    Retries on API errors and JSON parse failures.
     """
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": json.dumps(context, indent=2)},
-        ],
+    def _call():
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": json.dumps(context, indent=2)},
+            ],
+        )
+        content = response.choices[0].message.content
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            import re
+            m = re.search(r'\{[\s\S]*\}', content)
+            if m:
+                try:
+                    return json.loads(m.group())
+                except Exception:
+                    pass
+            return {"error": "json_parse_failed", "raw": content[:500]}
+
+    return retry_call(
+        _call,
+        is_error=lambda r: isinstance(r, dict) and "error" in r,
+        label="llm",
     )
-    content = response.choices[0].message.content
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        import re
-        m = re.search(r'\{[\s\S]*\}', content)
-        if m:
-            try:
-                return json.loads(m.group())
-            except Exception:
-                pass
-        return {"error": "json_parse_failed", "raw": content[:500]}
 
 
 async def run_analyst_async(system_prompt: str, context: dict, model: str = MODEL) -> dict:

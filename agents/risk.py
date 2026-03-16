@@ -11,7 +11,6 @@ _SYSTEM_TEMPLATE = """You are a risk management specialist for a trading system.
 You receive:
 - ATR (average true range) at multiple timeframes — this is your volatility measure
 - Current portfolio holdings and USD balances
-- Recent trade performance (wins/losses) if available
 - The threshold flags that triggered this analysis cycle
 - Risk settings (hard limits from the operator — you MUST NOT exceed these)
 
@@ -85,4 +84,6 @@ async def analyze(context: dict) -> dict:
     import db as _db
     settings = context.get("settings") or _db.get_settings()
     system   = _build_system(settings)
-    return await run_analyst_async(system, context)
+    # Pop settings before LLM call — limits are already baked into the system prompt
+    payload  = {k: v for k, v in context.items() if k != "settings"}
+    return await run_analyst_async(system, payload)

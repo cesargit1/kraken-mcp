@@ -38,7 +38,13 @@ async def analyze(context: dict) -> dict:
     context keys:
       ticker         - str
       current_price  - float
-      indicators     - {timeframe: {rsi, macd, bb_*, ema_*, obv, atr, peaks_json, troughs_json, threshold_flags}}
-      flags          - list of triggered flags across timeframes
+      indicators     - {timeframe: {ticker, timeframe, ts,
+                         latest_open, latest_high, latest_low, latest_close, latest_volume,
+                         rsi, macd, macd_signal, macd_hist,
+                         bb_upper, bb_middle, bb_lower,
+                         ema_20, ema_50, obv, atr,
+                         vwap (1h/4h only),
+                         peaks_json, troughs_json, threshold_flags}}
+      flags          - list of triggered flags across all timeframes
     """
     return await run_analyst_async(SYSTEM, context)

@@ -11,6 +11,11 @@ import sys
 import signal
 import subprocess
 
+# Use the venv python if we're not already inside it
+_venv_python = os.path.join(os.path.dirname(__file__), ".venv", "bin", "python3")
+if os.path.exists(_venv_python) and sys.executable != os.path.realpath(_venv_python):
+    os.execv(_venv_python, [_venv_python] + sys.argv)
+
 procs = []
 
 
@@ -32,14 +37,8 @@ ui_proc = subprocess.Popen(
 )
 procs.append(ui_proc)
 print("[run] Dashboard → http://localhost:8000")
-
-bot_proc = subprocess.Popen(
-    [sys.executable, "bot.py"],
-    env=env,
-)
-procs.append(bot_proc)
-print(f"[run] Bot started (mode={env.get('TRADING_MODE', 'paper')})")
-print("[run] Press Ctrl+C to stop both.\n")
+print("[run] Bot loop started inside the UI server process.")
+print("[run] Press Ctrl+C to stop.\n")
 
 # Wait for either process to exit
 while True:

@@ -13,7 +13,7 @@ You receive:
 - risk_analysis: max position size, stop-loss recommendation, leverage cap
 - ticker: the asset being analyzed
 - current_price: latest price
-- open_position: the currently open position (null if flat). Contains: side ('long'|'short'), volume, entry_price, stop_loss, leverage
+- open_position: the currently open position (null if flat). Contains: side ('long'|'short'), quantity, entry_price, stop_loss, leverage
 - current_holdings: what is currently owned (from Kraken balance)
 
 POSITION STATE RULES — read carefully:
@@ -36,6 +36,7 @@ EXIT RULES (only when position is open):
 
 Always respect risk analyst's max_position_usd and recommended_leverage as hard limits.
 For every non-hold decision you must provide exact size_usd (for entries only) and stop_loss price (for entries only).
+CRITICAL: For 'buy' or 'short' actions, size_usd MUST be a positive number (use risk_analysis.max_position_usd). Never return null for size_usd on an entry action.
 
 Respond with ONLY a valid JSON object — no markdown, no explanation outside the JSON:
 {
@@ -55,6 +56,7 @@ async def analyze(context: dict) -> dict:
     context keys:
       ticker               - str
       current_price        - float
+      open_position        - Flat if no position, else {side, quantity, entry_price, stop_loss, leverage}
       current_holdings     - dict from Kraken balance()
       technical_analysis   - output from technical agent
       social_analysis      - output from social agent

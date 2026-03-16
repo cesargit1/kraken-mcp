@@ -1,14 +1,14 @@
-"""Backfill open positions for trades that executed but weren't recorded."""
+"""Backfill open positions for agent runs that executed but weren't recorded."""
 from dotenv import load_dotenv
 load_dotenv()
 import db
 
-# Trades #18 (SPYx), #29 (QQQx), #32 (AAPLx) — sim=True but no position row created
+# Agent runs #18 (SPYx), #29 (QQQx), #32 (AAPLx) — sim=True but no position row created
 # because the SSE stream was missing db.open_position() calls.
-ORPHANED_TRADE_IDS = [18, 29, 32]
+ORPHANED_AGENT_IDS = [18, 29, 32]
 
 client = db.get_client()
-rows = client.table("trade_log").select("*").in_("id", ORPHANED_TRADE_IDS).execute().data
+rows = client.table("agent_log").select("*").in_("id", ORPHANED_AGENT_IDS).execute().data
 
 for t in rows:
     ticker = t["ticker"]
@@ -30,12 +30,11 @@ for t in rows:
     db.open_position(
         ticker=ticker,
         side="long" if t["action"] == "buy" else "short",
-        volume=volume,
+        quantity=volume,
         entry_price=price,
         stop_loss=t.get("stop_loss") or None,
         leverage=lev,
-        trade_log_id=t["id"],
+        agent_log_id=t["id"],
     )
-    print(f"  backfilled {ticker}: short {volume} @ ${price} lev={lev}x (trade #{t['id']})")
-
+    print(f"  backfilled {ticker}: short {volume} @ ${price} lev={lev}x (agent_log #{t['id']})")
 print("Done.")

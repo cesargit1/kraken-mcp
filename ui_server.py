@@ -15,6 +15,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -46,7 +47,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="xStocks Bot Dashboard", lifespan=lifespan)
 
-UI_HTML = Path(__file__).parent / "ui" / "index.html"
+# Jinja2 template rendering
+from jinja2 import Environment, FileSystemLoader
+_TEMPLATE_DIR = Path(__file__).parent / "ui" / "templates"
+_jinja_env = Environment(loader=FileSystemLoader(str(_TEMPLATE_DIR)))
+
+# Serve static files (CSS, JS)
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "ui" / "static")), name="static")
 
 # ---------------------------------------------------------------------------
 # Live bot-run state — written by bot.py hooks via shared module state
@@ -105,12 +112,132 @@ _CSP = (
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return HTMLResponse(content=UI_HTML.read_text(), headers={"Content-Security-Policy": _CSP})
+    html = _jinja_env.get_template("base.html").render()
+    return HTMLResponse(content=html, headers={"Content-Security-Policy": _CSP})
 
 
 @app.get("/api/watchlist")
 async def api_watchlist():
     return db.get_all_watchlist_tickers()
+
+
+@app.post("/api/watchlist")
+async def api_add_watchlist(request: Request):
+    body = await request.json()
+    ticker = (body.get("ticker") or "").strip()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+    row = {
+        "ticker":      ticker,
+        "source":      body.get("source", "kraken_crypto"),
+        "pair":        body.get("pair") or ticker,
+        "asset_class": body.get("asset_class", "spot"),
+        "search_name": body.get("search_name") or None,
+        "active":      True,
+    }
+    try:
+        r = db.get_client().table("watchlist").insert(row).execute()
+        return r.data[0] if r.data else row
+    except Exception as e:
+        if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+            raise HTTPException(status_code=409, detail=f"Ticker '{ticker}' already exists")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/watchlist/{ticker}")
+async def api_patch_watchlist(ticker: str, request: Request):
+    body = await request.json()
+    allowed = {"active", "search_name", "pair", "asset_class", "source"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+    try:
+        r = db.get_client().table("watchlist").update(updates).eq("ticker", ticker).execute()
+        if not r.data:
+            raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
+        return r.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/watchlist/{ticker}")
+async def api_delete_watchlist(ticker: str):
+    try:
+        r = db.get_client().table("watchlist").delete().eq("ticker", ticker).execute()
+        if not r.data:
+            raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
+        return {"deleted": ticker}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/kraken-pairs")
+async def api_kraken_pairs(q: str = ""):
+    """Search Kraken tradable pairs. Queries both spot and tokenized_asset classes."""
+    if len(q) < 1:
+        raise HTTPException(status_code=400, detail="query 'q' required (min 1 char)")
+    loop = asyncio.get_running_loop()
+    query_upper = q.upper()
+
+    async def fetch_pairs(aclass: str | None):
+        args = ["pairs"]
+        if aclass:
+            args += ["--aclass", aclass]
+        return await loop.run_in_executor(None, lambda: run_kraken(args))
+
+    spot_data, xstock_data = await asyncio.gather(
+        fetch_pairs(None),
+        fetch_pairs("tokenized_asset"),
+    )
+
+    results = []
+    seen = set()
+    for data, source, ac in [
+        (xstock_data, "kraken_xstock", "tokenized_asset"),
+        (spot_data, "kraken_crypto", "spot"),
+    ]:
+        if not isinstance(data, dict) or "error" in data:
+            continue
+        for pair_key, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            altname = info.get("altname", "")
+            base = info.get("base", "")
+            wsname = info.get("wsname", "")
+            # Match against query
+            if not (query_upper in pair_key.upper() or
+                    query_upper in altname.upper() or
+                    query_upper in base.upper() or
+                    query_upper in wsname.upper()):
+                continue
+            # Only USD-quoted pairs, skip duplicates
+            quote = info.get("quote", "")
+            if quote not in ("ZUSD", "USD"):
+                continue
+            if pair_key in seen:
+                continue
+            seen.add(pair_key)
+            # Derive a search_name
+            if ac == "tokenized_asset":
+                sname = base.removesuffix("x") if base.endswith("x") else base
+            else:
+                sname = altname.replace("USD", "").replace("XBT", "Bitcoin BTC").replace("ETH", "Ethereum ETH") or base
+            results.append({
+                "pair":         pair_key,
+                "altname":      altname,
+                "base":         base,
+                "wsname":       wsname,
+                "source":       source,
+                "asset_class":  ac,
+                "search_name":  sname,
+            })
+    # Sort: xStocks first, then by altname
+    results.sort(key=lambda r: (0 if r["source"] == "kraken_xstock" else 1, r["altname"]))
+    return results[:50]
 
 
 @app.get("/api/positions")
@@ -122,23 +249,30 @@ async def api_positions():
     balance = await loop.run_in_executor(None, lambda: run_kraken(balance_cmd))
 
     # Get current prices — union of active watchlist + any ticker with an open position
-    watchlist_all = db.get_all_watchlist_tickers()
-    open_tickers  = {p["ticker"] for p in db.get_all_open_positions()}
-    price_rows    = [r for r in watchlist_all
-                     if r.get("active") or r["ticker"] in open_tickers]
-    prices = {}
-    for row in price_rows:
+    watchlist_all    = db.get_all_watchlist_tickers()
+    open_tickers     = {p["ticker"] for p in db.get_all_open_positions()}
+    watchlist_tickers = {r["ticker"] for r in watchlist_all}
+    price_rows = [r for r in watchlist_all
+                  if r.get("active") or r["ticker"] in open_tickers]
+    # For open positions whose ticker isn't in the watchlist at all, fall back to
+    # using the ticker itself as the Kraken pair name (e.g. "SOLUSD").
+    for t in open_tickers - watchlist_tickers:
+        price_rows.append({"ticker": t, "pair": t, "asset_class": "spot"})
+    async def fetch_price(row):
         try:
             p = await loop.run_in_executor(
                 None,
                 lambda r=row: bot.get_current_price(
                     r.get("pair", r["ticker"]),
-                    r.get("asset_class", "tokenized_asset"),
+                    r.get("asset_class", "spot"),
                 ),
             )
-            prices[row["ticker"]] = p
+            return row["ticker"], p
         except Exception:
-            pass
+            return row["ticker"], None
+
+    results = await asyncio.gather(*[fetch_price(row) for row in price_rows])
+    prices = {ticker: p for ticker, p in results if p is not None}
 
     # Open positions from positions table (source of truth)
     raw_positions = db.get_all_open_positions()
@@ -147,7 +281,7 @@ async def api_positions():
         ticker   = pos["ticker"]
         entry    = pos.get("entry_price") or 0
         current  = prices.get(ticker)
-        volume   = pos.get("volume") or 0
+        volume   = pos.get("quantity") or 0
         lev      = pos.get("leverage", 1)
         side     = pos.get("side", "long")
         pnl = None
@@ -157,6 +291,8 @@ async def api_positions():
                 else (entry - current) * volume * lev,
                 2,
             )
+        notional    = entry * volume
+        margin_cost = round(db.calc_margin_cost(notional, lev, pos.get("opened_at")), 2)
         open_positions.append({
             "ticker":        ticker,
             "action":        side,
@@ -169,20 +305,21 @@ async def api_positions():
             "pnl":           pnl,
             "reasoning":     "",    # fetched separately below
             "opened_at":     pos.get("opened_at"),
-            "trade_id":      pos.get("trade_log_id"),
+            "trade_id":      pos.get("agent_log_id"),
+            "margin_cost":   margin_cost,
         })
 
-    # Enrich reasoning from trade_log
+    # Enrich reasoning from agent_log
     if open_positions:
         trade_ids = [p["trade_id"] for p in open_positions if p["trade_id"]]
         if trade_ids:
-            reasons = db.get_recent_trades(limit=200)
+            reasons = db.get_recent_agent_runs(limit=200)["data"]
             reasons_map = {t["id"]: t.get("decision_reasoning", "") for t in reasons}
             for p in open_positions:
                 p["reasoning"] = reasons_map.get(p["trade_id"], "")
 
-    # Recent trades from DB
-    trades = db.get_recent_trades(limit=30)
+    # Recent trades from transaction_ledger
+    trades = await loop.run_in_executor(None, lambda: db.get_recent_transactions(30))
 
     # Computed portfolio summary
     total_size   = sum((p["entry_price"] or 0) * (p["volume"] or 0) for p in open_positions)
@@ -199,18 +336,29 @@ async def api_positions():
     realized_pnl  = await loop.run_in_executor(None, db.get_realized_pnl)
     available_cash = round(paper_capital - total_cost + realized_pnl, 2)
 
-    summary = {
-        "cash":           available_cash,
-        "paper_capital":  paper_capital,
-        "realized_pnl":   round(realized_pnl, 2),
-        "total_size":     round(total_size, 2),
-        "total_cost":     round(total_cost, 2),
-        "total_pnl":      round(total_pnl, 2),
-        "pnl_pct":        pnl_pct,
-        "pos_count":      len(open_positions),
-    }
+    closed_positions = await loop.run_in_executor(None, lambda: db.get_closed_positions_full(50))
 
-    closed_positions = await loop.run_in_executor(None, lambda: db.get_closed_positions(30))
+    # Total fees = entry + exit fee on every closed position (already-paid costs only)
+    total_fees = sum(
+        db.calc_trade_fee((p.get("entry_price") or 0) * (p.get("quantity") or 0))
+        + db.calc_trade_fee((p.get("close_price") or 0) * (p.get("quantity") or 0))
+        for p in closed_positions
+    )
+    # Margin cost = accrued interest on leveraged closed positions only
+    total_margin_cost = sum((p.get("margin_cost") or 0) for p in closed_positions)
+
+    summary = {
+        "cash":              available_cash,
+        "paper_capital":     paper_capital,
+        "realized_pnl":      round(realized_pnl, 2),
+        "total_size":        round(total_size, 2),
+        "total_cost":        round(total_cost, 2),
+        "total_pnl":         round(total_pnl, 2),
+        "pnl_pct":           pnl_pct,
+        "pos_count":         len(open_positions),
+        "total_fees":        round(total_fees, 2),
+        "total_margin_cost": round(total_margin_cost, 2),
+    }
 
     return {
         "mode":             MODE.value,
@@ -281,20 +429,18 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
 
         # ── 3. Current price ─────────────────────────────────────────────────
         pair        = ticker_row.get("pair", ticker)
-        asset_class = ticker_row.get("asset_class", "tokenized_asset")
+        asset_class = ticker_row.get("asset_class", "spot")
         current_price = await loop.run_in_executor(
             None, lambda: bot.get_current_price(pair, asset_class)
         )
         yield sse({"step": "price", "ticker": ticker, "price": current_price})
 
-        # ── 4. X social search (streamed) ────────────────────────────────────
-        clean_ticker = ticker[:-1] if ticker.lower().endswith("x") else ticker
-        x_query = (
-            f"Search X for posts about ${clean_ticker} stock ticker in the last hour. "
-            "Include post texts, volume trends, and any notable news or sentiment."
-        )
+        # ── 4. X social search (streamed) ──────────────────────────────────────
+        from core import get_search_name, build_x_query
+        search_name = get_search_name(ticker_row)
+        x_query = build_x_query(ticker_row)
         yield sse({"step": "social_start", "ticker": ticker,
-                   "query": f"${clean_ticker}"})
+                   "query": search_name})
 
         # Stream chunks from xAI Responses API in a thread so we don't block asyncio
         x_chunks: list[str] = []
@@ -396,19 +542,21 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
                 action = "hold"
                 yield sse({"step": "guard", "ticker": ticker, "msg": "No open position — overriding to hold"})
 
-        trade_id = db.log_trade(
+        size_usd_ui = decision.get("size_usd") or 0
+
+        agent_log_id = db.log_agent_run(
             ticker=ticker,
             action=action,
-            size=decision.get("size_usd") or 0,
-            leverage=decision.get("leverage", 1),
-            stop_loss=decision.get("stop_loss") or 0,
-            entry_price=current_price or 0,
             technical=technical,
             social=social_result,
             risk=risk,
             decision_reasoning=decision.get("reasoning", ""),
+            decision_json=decision,
+            pair=ticker_row.get("pair"),
+            trigger_flags="ui_trigger",
             executed=False,
         )
+        trade_id = agent_log_id  # used below for position linking
         db.update_signal_state(ticker, decision, "ui_trigger")
 
         if action != "hold" and current_price and decision.get("size_usd"):
@@ -429,7 +577,7 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
                     max_lev = _settings.get("max_leverage", 3)
                     if (decision.get("leverage") or 1) > max_lev:
                         decision["leverage"] = max_lev
-                    used_margin    = sum(((p["entry_price"] or 0) * (p["volume"] or 0)) / max(p["leverage"] or 1, 1) for p in all_open)
+                    used_margin    = sum(((p["entry_price"] or 0) * (p["quantity"] or 0)) / max(p["leverage"] or 1, 1) for p in all_open)
                     realized       = await loop.run_in_executor(None, db.get_realized_pnl)
                     available_cash = paper_capital - used_margin + realized
                     required_margin = (decision.get("size_usd") or 0) / max(decision.get("leverage", 1), 1)
@@ -442,21 +590,38 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
                 yield sse({"step": "trade_start", "ticker": ticker, "action": action,
                            "size_usd": decision.get("size_usd"), "price": current_price})
                 exec_result = await bot.execute_trade(ticker_row, decision, current_price)
-                db.mark_trade_executed(trade_id, exec_result)
+                exec_volume = exec_result.get("volume") or round(
+                    (decision.get("size_usd") or 0) / (current_price or 1), 4
+                )
+                db.log_transaction(
+                    agent_log_id=agent_log_id,
+                    ticker=ticker,
+                    action=action,
+                    current_price=current_price or 0,
+                    volume=exec_volume,
+                    notional_usd=size_usd_ui,
+                    leverage=decision.get("leverage", 1),
+                    stop_loss=decision.get("stop_loss"),
+                    fee=0.0,
+                    pair=ticker_row.get("pair"),
+                    order_type="market",
+                    source_type="paper",
+                    is_simulated=exec_result.get("simulated", False),
+                    execution_result=exec_result,
+                )
+                db.mark_agent_run_executed(agent_log_id)
 
                 # Record position change (mirrors bot.py logic)
                 if action in ("buy", "short") and not exec_result.get("error"):
-                    volume = exec_result.get("volume") or round(
-                        (decision.get("size_usd") or 0) / (current_price or 1), 4
-                    )
+                    volume = exec_volume
                     await loop.run_in_executor(None, lambda: db.open_position(
                         ticker=ticker,
                         side="long" if action == "buy" else "short",
-                        volume=volume,
+                        quantity=volume,
                         entry_price=current_price,
                         stop_loss=decision.get("stop_loss"),
                         leverage=decision.get("leverage", 1),
-                        trade_log_id=trade_id,
+                        agent_log_id=agent_log_id,
                     ))
                 elif action in ("sell", "cover") and not exec_result.get("error"):
                     await loop.run_in_executor(None, lambda: db.close_position(ticker, current_price, "ai_signal"))
@@ -514,20 +679,28 @@ async def api_bot_status():
     return {"tickers": result, "cycle": _cycle_state}
 
 
-@app.get("/api/trade-history")
-async def api_trade_history():
-    """Return recent trade log entries (summary columns only — no heavy JSON blobs)."""
+@app.get("/api/agent-history")
+async def api_agent_history(page: int = 1):
+    """Return paginated agent log entries (summary columns only — no heavy JSON blobs)."""
+    per_page = 40
+    if page < 1:
+        page = 1
+    offset = (page - 1) * per_page
     loop = asyncio.get_running_loop()
-    trades = await loop.run_in_executor(None, lambda: db.get_recent_trades(limit=100))
-    return trades
+    result = await loop.run_in_executor(None, lambda: db.get_recent_agent_runs(limit=per_page, offset=offset))
+    total = result["total"]
+    total_pages = max(1, -(-total // per_page))  # ceil division
+    return {"data": result["data"], "page": page, "per_page": per_page, "total": total, "total_pages": total_pages}
 
 
-@app.get("/api/trade-log/{trade_id}")
-async def api_trade_detail(trade_id: int):
-    """Return full detail for a single trade log row including specialist analysis blobs."""
+@app.get("/api/agent-log/{agent_log_id}")
+async def api_agent_detail(agent_log_id: int):
+    """Return full detail for a single agent_log row plus linked transaction_ledger records."""
     loop = asyncio.get_running_loop()
-    row = await loop.run_in_executor(None, lambda: db.get_trade_by_id(trade_id))
+    row = await loop.run_in_executor(None, lambda: db.get_agent_run_by_id(agent_log_id))
     if not row:
         from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Trade not found")
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    txns = await loop.run_in_executor(None, lambda: db.get_transactions_for_agent(agent_log_id))
+    row["transactions"] = txns
     return row

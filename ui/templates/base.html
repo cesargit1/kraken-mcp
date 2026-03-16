@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-900 text-white">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>xStocks Bot Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/static/style.css?v=2" />
+</head>
+<body class="h-full">
+
+  <!-- Sidebar backdrop (mobile) -->
+  <div id="sidebar-backdrop" class="fixed inset-0 z-40 bg-gray-900/80 transition-opacity duration-300 hidden lg:hidden" onclick="closeSidebar()"></div>
+
+  <!-- Sidebar -->
+  <aside id="sidebar" class="fixed inset-y-0 left-0 z-50 flex w-72 flex-col transform -translate-x-full transition-transform duration-300 ease-in-out lg:translate-x-0">
+    {% include "components/sidebar.html" %}
+  </aside>
+
+  <!-- Main content -->
+  <div class="lg:pl-72">
+    <!-- Sticky top bar -->
+    <div class="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-white/5 bg-gray-900 px-4 sm:px-6 lg:px-8">
+      <button type="button" class="-m-2.5 p-2.5 text-white lg:hidden" onclick="openSidebar()">
+        <span class="sr-only">Open sidebar</span>
+        <svg viewBox="0 0 20 20" fill="currentColor" class="size-5">
+          <path d="M2 4.75A.75.75 0 0 1 2.75 4h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4.75ZM2 10a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm0 5.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd" fill-rule="evenodd" />
+        </svg>
+      </button>
+      <div class="flex flex-1 items-center gap-x-4">
+        <span class="text-sm font-semibold text-white lg:hidden">🤖 Kraken Bot</span>
+        <span class="inline-flex items-center rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset bg-green-400/10 text-green-400 ring-green-400/20 lg:hidden" id="mode-badge-mobile">paper</span>
+      </div>
+    </div>
+
+    <main class="p-4 lg:p-6">
+      {% include "tabs/positions.html" %}
+      {% include "tabs/watchlist.html" %}
+      {% include "tabs/agent.html" %}
+      {% include "tabs/settings.html" %}
+    </main>
+  </div>
+
+<script src="/static/app.js?v=2"></script>
+</body>
+</html>

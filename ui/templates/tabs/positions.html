@@ -1,0 +1,118 @@
+<!-- ══════════════ POSITIONS TAB ══════════════ -->
+<div id="tab-positions" class="tab-panel active">
+
+  <!-- Stats heading bar -->
+  <div class="flex flex-col items-start justify-between gap-x-8 gap-y-4 bg-gray-700/10 px-4 py-4 sm:flex-row sm:items-center sm:px-6 lg:px-8 mb-6 -mx-4 lg:-mx-6 -mt-4 lg:-mt-6">
+    <div>
+      <div class="flex items-center gap-x-3">
+        <div class="flex-none rounded-full bg-green-400/10 p-1 text-green-400">
+          <div class="size-2 rounded-full bg-current"></div>
+        </div>
+        <h1 class="text-base/7 font-semibold text-white">Portfolio Overview</h1>
+      </div>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="positions-updated" class="text-xs text-gray-500"></span>
+      <button class="rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-white/20" onclick="loadPositions()">↻ Refresh</button>
+    </div>
+  </div>
+
+  <!-- Stats tiles -->
+  <div class="grid grid-cols-1 bg-gray-700/10 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-9 mb-6 rounded-lg overflow-hidden">
+    <div class="border-t border-white/5 px-4 py-5 sm:px-6">
+      <p class="text-sm/6 font-medium text-gray-400">Starting Capital</p>
+      <p class="mt-2 flex items-baseline gap-x-2">
+        <span class="text-2xl font-semibold tracking-tight text-white" style="font-family:var(--font-mono)" id="capital-val">—</span>
+      </p>
+    </div>
+    <div class="border-t border-white/5 px-4 py-5 sm:border-l sm:px-6">
+      <p class="text-sm/6 font-medium text-gray-400">Cash Invested</p>
+      <p class="mt-2 flex items-baseline gap-x-2">
+        <span class="text-2xl font-semibold tracking-tight text-white" style="font-family:var(--font-mono)" id="total-cost">—</span>
+      </p>
+      <p class="text-xs text-gray-500 mt-1" id="total-cost-pct"></p>
+    </div>
+    <div class="border-t border-white/5 px-4 py-5 sm:px-6 lg:border-l">
+      <p class="text-sm/6 font-medium text-gray-400">Available Cash</p>
+      <p class="mt-2 flex items-baseline gap-x-2">
+        <span class="text-2xl font-semibold tracking-tight text-white" style="font-family:var(--font-mono)" id="cash-val">—</span>
+      </p>
+      <p class="text-xs text-gray-500 mt-1" id="cash-sub"></p>
+    </div>
+    <div class="border-t border-white/5 px-4 py-5 sm:border-l sm:px-6">
+      <p class="text-sm/6 font-medium text-gray-400">Total Exposure</p>
+      <p class="mt-2 flex items-baseline gap-x-2">
+        <span class="text-2xl font-semibold tracking-tight text-white" style="font-family:var(--font-mono)" id="total-size">—</span>
+      </p>
+      <p class="text-xs text-gray-500 mt-1" id="total-size-sub"></p>
+    </div>
+    <div class="border-t border-white/5 px-4 py-5 sm:px-6 xl:border-l">
+      <p class="text-sm/6 font-medium text-gray-400">Open Positions</p>
+      <p class="mt-2 flex items-baseline gap-x-2">
+        <span class="text-2xl font-semibold tracking-tight text-white" style="font-family:var(--font-mono)" id="pos-count">—</span>
+      </p>
+    </div>
+    <div class="border-t border-white/5 px-4 py-5 sm:border-l sm:px-6">
+      <p class="text-sm/6 font-medium text-gray-400">Unrealised P&amp;L</p>
+      <p class="mt-2 flex items-baseline gap-x-2">
+        <span class="text-2xl font-semibold tracking-tight text-white" style="font-family:var(--font-mono)" id="total-pnl">—</span>
+      </p>
+      <p class="text-xs mt-1" id="total-pnl-pct"></p>
+    </div>
+    <div class="border-t border-white/5 px-4 py-5 sm:px-6 xl:border-l">
+      <p class="text-sm/6 font-medium text-gray-400">Realised P&amp;L</p>
+      <p class="mt-2 flex items-baseline gap-x-2">
+        <span class="text-2xl font-semibold tracking-tight text-white" style="font-family:var(--font-mono)" id="realized-pnl">—</span>
+      </p>
+    </div>
+    <div class="border-t border-white/5 px-4 py-5 sm:px-6 xl:border-l">
+      <p class="text-sm/6 font-medium text-gray-400">Total Fees</p>
+      <p class="mt-2 flex items-baseline gap-x-2">
+        <span class="text-2xl font-semibold tracking-tight text-red-400" style="font-family:var(--font-mono)" id="total-fees">—</span>
+      </p>
+    </div>
+    <div class="border-t border-white/5 px-4 py-5 sm:px-6 xl:border-l">
+      <p class="text-sm/6 font-medium text-gray-400">Margin Costs</p>
+      <p class="mt-2 flex items-baseline gap-x-2">
+        <span class="text-2xl font-semibold tracking-tight text-orange-400" style="font-family:var(--font-mono)" id="total-margin-cost">—</span>
+      </p>
+    </div>
+  </div>
+
+  <!-- Open Positions -->
+  <div class="border-t border-white/10 pt-6 mb-6">
+    <h2 class="px-4 text-base/7 font-semibold text-white sm:px-6 lg:px-8">Open Positions</h2>
+    <div class="mt-4 flow-root">
+      <div class="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+        <div class="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8" id="open-positions-body">
+          <div class="py-10 text-center text-gray-500 text-sm">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Closed Positions -->
+  <div class="border-t border-white/10 pt-6 mb-6">
+    <h2 class="px-4 text-base/7 font-semibold text-white sm:px-6 lg:px-8">Closed Positions <span class="font-normal text-xs text-gray-500">last 30</span></h2>
+    <div class="mt-4 flow-root">
+      <div class="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+        <div class="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8" id="closed-positions-body">
+          <div class="py-10 text-center text-gray-500 text-sm">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent Trades -->
+  <div class="border-t border-white/10 pt-6 mb-6">
+    <h2 class="px-4 text-base/7 font-semibold text-white sm:px-6 lg:px-8">Recent Trades <span class="font-normal text-xs text-gray-500">last 30</span></h2>
+    <div class="mt-4 flow-root">
+      <div class="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+        <div class="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8" id="recent-trades-body">
+          <div class="py-10 text-center text-gray-500 text-sm">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>

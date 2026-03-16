@@ -1,0 +1,102 @@
+<!-- ══════════════ SETTINGS TAB ══════════════ -->
+<div id="tab-settings" class="tab-panel">
+  <div class="divide-y divide-white/10">
+    <div class="grid max-w-7xl grid-cols-1 gap-x-8 gap-y-10 px-4 py-16 sm:px-6 md:grid-cols-3 lg:px-8">
+      <div>
+        <h2 class="text-base/7 font-semibold text-white">⚙️ Risk &amp; Capital Settings</h2>
+        <p class="mt-1 text-sm/6 text-gray-400">These parameters are stored in the database and enforced by both the risk agent and trade execution. Changes take effect on the next bot cycle.</p>
+      </div>
+
+      <form id="settings-form" onsubmit="saveSettings(event)" class="md:col-span-2">
+        <div class="grid grid-cols-1 gap-x-6 gap-y-8 sm:max-w-xl sm:grid-cols-6">
+
+          <div class="sm:col-span-3">
+            <label for="s-paper_capital" class="block text-sm/6 font-medium text-white">Starting Capital ($)</label>
+            <div class="mt-2">
+              <input type="number" id="s-paper_capital" min="100" step="1" required class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">Total paper/live capital. Used for all % calculations.</p>
+          </div>
+
+          <div class="sm:col-span-3">
+            <label for="s-max_position_pct" class="block text-sm/6 font-medium text-white">Max Position Size (%)</label>
+            <div class="mt-2">
+              <input type="number" id="s-max_position_pct" min="1" max="100" step="0.5" required class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">Max % of capital per individual position.</p>
+          </div>
+
+          <div class="sm:col-span-3">
+            <label for="s-max_position_usd" class="block text-sm/6 font-medium text-white">Max Position Size (USD, hard cap)</label>
+            <div class="mt-2">
+              <input type="number" id="s-max_position_usd" min="0" step="1" placeholder="optional" class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">Optional hard dollar cap per position.</p>
+          </div>
+
+          <div class="sm:col-span-3">
+            <label for="s-max_leverage" class="block text-sm/6 font-medium text-white">Max Leverage</label>
+            <div class="mt-2">
+              <input type="number" id="s-max_leverage" min="1" max="5" step="1" required class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">Hard cap on leverage (1–5x).</p>
+          </div>
+
+          <div class="sm:col-span-3">
+            <label for="s-max_open_positions" class="block text-sm/6 font-medium text-white">Max Open Positions</label>
+            <div class="mt-2">
+              <input type="number" id="s-max_open_positions" min="1" max="50" step="1" required class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">Maximum number of concurrent open positions.</p>
+          </div>
+
+          <div class="sm:col-span-3">
+            <label for="s-risk_per_trade_pct" class="block text-sm/6 font-medium text-white">Max Risk Per Trade (%)</label>
+            <div class="mt-2">
+              <input type="number" id="s-risk_per_trade_pct" min="0.1" max="25" step="0.1" required class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">Max % of capital risked per trade.</p>
+          </div>
+
+          <div class="sm:col-span-3">
+            <label for="s-stop_loss_pct_default" class="block text-sm/6 font-medium text-white">Default Stop-Loss (%)</label>
+            <div class="mt-2">
+              <input type="number" id="s-stop_loss_pct_default" min="0.1" max="25" step="0.1" required class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">Fallback stop-loss % from entry.</p>
+          </div>
+
+          <div class="sm:col-span-3">
+            <label for="s-poll_interval_sec" class="block text-sm/6 font-medium text-white">Poll Interval (seconds)</label>
+            <div class="mt-2">
+              <input type="number" id="s-poll_interval_sec" min="30" max="3600" step="30" required class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">How often the fast loop runs. Default 300 (5 min).</p>
+          </div>
+
+          <div class="sm:col-span-3">
+            <label for="s-ai_timer_min" class="block text-sm/6 font-medium text-white">AI Timer (minutes)</label>
+            <div class="mt-2">
+              <input type="number" id="s-ai_timer_min" min="5" max="1440" step="5" required class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">Force a full AI analysis run every N minutes. Default 60.</p>
+          </div>
+
+          <div class="sm:col-span-3">
+            <label for="s-cooldown_min" class="block text-sm/6 font-medium text-white">Cooldown (minutes)</label>
+            <div class="mt-2">
+              <input type="number" id="s-cooldown_min" min="1" max="240" step="1" required class="block w-full rounded-md bg-white/5 px-3 py-1.5 text-base text-white outline outline-1 -outline-offset-1 outline-white/10 placeholder:text-gray-500 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500 sm:text-sm/6" />
+            </div>
+            <p class="mt-1 text-xs text-gray-500">Per-signal cooldown after an AI trigger fires. Default 30.</p>
+          </div>
+
+        </div>
+
+        <div class="mt-8 flex items-center gap-3">
+          <button type="submit" class="rounded-md bg-indigo-500 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500" id="settings-save-btn">💾 Save Settings</button>
+          <span id="settings-status" class="text-sm text-gray-400"></span>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
