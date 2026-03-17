@@ -28,11 +28,36 @@ ENTRY RULES (only when flat):
 - If specialists contradict each other: output 'hold'
 
 EXIT RULES (only when position is open):
-- If holding a short and signals flip bullish (both technical + social bullish > 60): output 'cover'
-- If holding a long and signals flip bearish (both technical + social bearish > 60): output 'sell'
-- If holding and signals are mixed or neutral: output 'hold' (let the position ride)
-- If holding and both signals confirm the direction: output 'hold' (position is working)
-- Stop-loss is monitored separately by the system — do NOT set stop_loss on exit actions.
+Do NOT use a simple "both must agree" rule. Instead, compute a weighted composite signal score and apply graduated thresholds.
+
+Step 1 — Assign directional multipliers:
+  bullish = +1 | bearish = -1 | neutral = 0
+
+Step 2 — Compute composite score (range approximately -100 to +100):
+  composite = (technical_direction × technical_confidence × 0.6)
+            + (social_direction    × social_confidence    × 0.4)
+  Examples:
+    tech bearish 80% + social bearish 60%  → composite = -48 + -24 = -72  (strong exit)
+    tech bearish 80% + social neutral 50%  → composite = -48 +   0 = -48  (moderate exit)
+    tech bearish 55% + social bullish 60%  → composite = -33 +  24 =  -9  (hold — conflicting)
+    tech bullish 70% + social neutral 40%  → composite = +42 +   0 = +42  (hold on long, moderate cover signal on short)
+
+Step 3 — Apply thresholds to the CURRENT position:
+  Holding a LONG (exit = sell):
+    composite ≤ -45  → output 'sell'  (strong counter-pressure — one strong + one moderate, or both moderate)
+    -30 to -44 AND at least one signal is bearish with confidence ≥ 65  → output 'sell'  (one clear leg, other not strongly bullish)
+    composite > -30  → output 'hold'  (noise / signal not convincing enough to exit)
+
+  Holding a SHORT (exit = cover):
+    composite ≥ +45  → output 'cover'
+    +30 to +44 AND at least one signal is bullish with confidence ≥ 65  → output 'cover'
+    composite < +30  → output 'hold'
+
+  Additional nuance — always hold if:
+    The two specialists directly contradict each other (one bullish > 60 AND other bearish > 60), regardless of composite.
+    This protects against whipsawing on genuinely uncertain conditions.
+
+Stop-loss is monitored separately by the system — do NOT set stop_loss on exit actions.
 
 Always respect risk analyst's max_position_usd and recommended_leverage as hard limits.
 For every non-hold decision you must provide exact size_usd (for entries only) and stop_loss price (for entries only).
@@ -45,8 +70,9 @@ Respond with ONLY a valid JSON object — no markdown, no explanation outside th
   "leverage": <1 | 2 | 3>,
   "stop_loss": <price for entries, null for exits/hold>,
   "confidence": <integer 0-100>,
+  "composite_score": <number — the computed composite from Step 2 above, e.g. -48.0>,
   "specialist_agreement": "full" | "partial" | "conflicting",
-  "reasoning": "<3-5 sentences synthesizing the decision>",
+  "reasoning": "<3-5 sentences synthesizing the decision, including the composite score rationale>",
   "key_contradictions": ["<any notable specialist disagreements>"]
 }"""
 
