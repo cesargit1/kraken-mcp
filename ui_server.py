@@ -244,10 +244,6 @@ async def api_kraken_pairs(q: str = ""):
 async def api_positions():
     loop = asyncio.get_running_loop()
 
-    # Kraken cash balance
-    balance_cmd = ["paper", "balance"] if MODE == Mode.PAPER else ["balance"]
-    balance = await loop.run_in_executor(None, lambda: run_kraken(balance_cmd))
-
     # Get current prices — union of active watchlist + any ticker with an open position
     watchlist_all    = db.get_all_watchlist_tickers()
     open_tickers     = {p["ticker"] for p in db.get_all_open_positions()}
@@ -350,8 +346,10 @@ async def api_positions():
         for p in closed_positions
     )
     total_fees = open_entry_fees + closed_fees
-    # Margin cost = accrued interest on leveraged closed positions only
-    total_margin_cost = sum((p.get("margin_cost") or 0) for p in closed_positions)
+    # Margin cost = accrued interest on leveraged positions (open + closed)
+    open_margin_cost  = sum((p.get("margin_cost") or 0) for p in open_positions)
+    closed_margin_cost = sum((p.get("margin_cost") or 0) for p in closed_positions)
+    total_margin_cost = open_margin_cost + closed_margin_cost
 
     summary = {
         "cash":              available_cash,
@@ -368,7 +366,6 @@ async def api_positions():
 
     return {
         "mode":             MODE.value,
-        "balance":          balance,
         "summary":          summary,
         "settings":         settings,
         "open_positions":   open_positions,
@@ -479,11 +476,7 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
         yield sse({"step": "social_data", "ticker": ticker,
                    "snippet": x_data[:600]})
 
-        # ── 5. Holdings ──────────────────────────────────────────────────────
-        balance_cmd = ["paper", "balance"] if MODE == Mode.PAPER else ["balance"]
-        holdings = await loop.run_in_executor(None, lambda: run_kraken(balance_cmd))
-
-        # ── 6. Build specialist inputs ───────────────────────────────────────
+        # ── 5. Build specialist inputs ────────────────────────────────────
         technical_context = {
             "ticker":        ticker,
             "current_price": current_price,
@@ -500,12 +493,11 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
             "ticker":        ticker,
             "current_price": current_price,
             "atr":           {tf: v.get("atr") for tf, v in all_indicators.items()},
-            "holdings":      holdings,
             "flags":         flags,
             "settings":      settings,
         }
 
-        # ── 7. Specialists (parallel) ────────────────────────────────────────
+        # ── 6. Specialists (parallel) ────────────────────────────────────────
         yield sse({"step": "specialists_start", "ticker": ticker})
         technical, social_result, risk = await asyncio.gather(
             technical_analyze(technical_context),
@@ -516,14 +508,13 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
         yield sse({"step": "social_agent_done", "ticker": ticker, "result": social_result})
         yield sse({"step": "risk_done", "ticker": ticker, "result": risk})
 
-        # ── 8. Decision ──────────────────────────────────────────────────────
+        # ── 7. Decision ──────────────────────────────────────────────────────
         yield sse({"step": "decision_start", "ticker": ticker})
         open_position = await loop.run_in_executor(None, lambda: db.get_open_position(ticker))
         decision_context = {
             "ticker":             ticker,
             "current_price":      current_price,
             "open_position":      open_position,
-            "current_holdings":   holdings,
             "technical_analysis": technical,
             "social_analysis":    social_result,
             "risk_analysis":      risk,
@@ -531,7 +522,7 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
         decision = await decision_analyze(decision_context)
         yield sse({"step": "decision_done", "ticker": ticker, "result": decision})
 
-        # ── 9. Log + Execute ─────────────────────────────────────────────────
+        # ── 8. Log + Execute ─────────────────────────────────────────────────
         action = decision.get("action", "hold")
 
         # Position guard — same rules as bot.py

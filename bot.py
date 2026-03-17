@@ -11,7 +11,9 @@ Event-triggered AI (per flagged ticker):
   - search_x() for social context
   - 3 specialist agents in parallel (technical, social, risk)
   - 1 decision agent synthesizing all three
-  - Log to Supabase + execute via Kraken
+  - Log to Supabase + simulate trade in DB
+
+All trades are simulated internally (DB-tracked). Kraken is used only for pricing.
 
 Usage:
   python3 bot.py              # paper mode (default)
@@ -26,7 +28,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from core import run_kraken, dispatch_tool, Mode, MODE
+from core import run_kraken, Mode, MODE
 import db
 import fetch as fetcher
 import indicators as ind
@@ -104,24 +106,8 @@ async def close_position_stop_loss(
     print(f"  [STOP-LOSS] {ticker} {side.upper()} @ ${current_price:.2f}  "
           f"(stop was ${position.get('stop_loss',0):.2f})")
 
-    if MODE == Mode.PAPER and asset_class == "tokenized_asset":
-        exec_result = {"simulated": True, "action": "close", "reason": "stop_loss",
-                       "volume": volume, "price": current_price}
-    else:
-        # Long → sell; Short → buy to cover
-        args = {"pair": pair, "volume": volume, "asset_class": asset_class,
-                "order_type": "market"}
-        if leverage > 1:
-            args["leverage"] = leverage
-            args["reduce_only"] = True
-        tool = "sell" if side == "long" else "buy"
-        loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(None, lambda: dispatch_tool(tool, args, MODE))
-        exec_result = {"raw": raw, "volume": volume, "price": current_price}
-
-    if exec_result.get("error"):
-        print(f"  [STOP-LOSS] {ticker}: execution failed — {exec_result['error']}. Position NOT closed in DB.")
-        return
+    exec_result = {"simulated": True, "action": "close", "reason": "stop_loss",
+                   "volume": volume, "price": current_price}
 
     closed = db.close_position(ticker, current_price, "stop_loss")
     pnl = closed.get("realized_pnl", 0) if closed else 0
@@ -184,50 +170,17 @@ async def execute_trade(ticker_row: dict, decision: dict, current_price: float) 
     if volume <= 0:
         return {"error": "zero volume computed"}
 
-    # Kraken CLI paper mode only supports spot crypto pairs.
-    # xStocks (tokenized_asset) are simulated internally in paper mode.
-    if MODE == Mode.PAPER and asset_class == "tokenized_asset":
-        result = {
-            "simulated": True,
-            "action":    action,
-            "volume":    volume,
-            "price":     current_price,
-            "size_usd":  round(volume * current_price, 2),
-            "leverage":  leverage,
-        }
-        print(f"  [sim]  {action.upper()} {volume} {pair} @ ~${current_price:.2f}  (paper sim — xStock not supported by Kraken paper CLI)")
-        return result
-
-    # "short" = opening a margin sell; requires leverage >= 2
-    if action == "short" and leverage < 2:
-        leverage = 2
-
-    args = {
-        "pair":        pair,
-        "volume":      volume,
-        "asset_class": asset_class,
-        "order_type":  "market",
+    # All trades are simulated internally — tracked in DB only, not on Kraken.
+    result = {
+        "simulated": True,
+        "action":    action,
+        "volume":    volume,
+        "price":     current_price,
+        "size_usd":  round(volume * current_price, 2),
+        "leverage":  leverage,
     }
-    if leverage > 1:
-        args["leverage"] = leverage
-    # reduce_only for closing existing margin positions (prevents opening new opposite side)
-    if action in ("sell", "cover") and leverage > 1:
-        args["reduce_only"] = True
-
-    loop = asyncio.get_event_loop()
-
-    if action == "buy":
-        raw = await loop.run_in_executor(None, lambda: dispatch_tool("buy", args, MODE))
-    elif action in ("sell", "short"):
-        raw = await loop.run_in_executor(None, lambda: dispatch_tool("sell", args, MODE))
-    elif action == "cover":
-        # Cover a short = buy back the shares
-        raw = await loop.run_in_executor(None, lambda: dispatch_tool("buy", args, MODE))
-    else:
-        return {"skipped": "hold"}
-
-    print(f"  [exec] {action.upper()} {volume} {pair} @ ~${current_price:.2f}: {raw[:120]}")
-    return {"raw": raw, "volume": volume, "price": current_price}
+    print(f"  [sim]  {action.upper()} {volume} {pair} @ ~${current_price:.2f}  (paper sim — DB tracked)")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -251,14 +204,11 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
         db.set_cooldown(ticker, flag)
     update_ticker_state(ticker, stage="context_fetch")
 
-    balance_cmd = ["paper", "balance"] if MODE == Mode.PAPER else ["balance"]
-
     # Fetch non-social context in parallel — X data is fetched by the social agent itself
     loop = asyncio.get_event_loop()
-    current_price, open_position, holdings, settings, decision_history, all_open_positions, realized_pnl = await asyncio.gather(
+    current_price, open_position, settings, decision_history, all_open_positions, realized_pnl = await asyncio.gather(
         loop.run_in_executor(None, lambda: get_current_price(pair, asset_class)),
         loop.run_in_executor(None, lambda: db.get_open_position(ticker)),
-        loop.run_in_executor(None, lambda: run_kraken(balance_cmd)),
         loop.run_in_executor(None, db.get_settings),
         loop.run_in_executor(None, lambda: db.get_ticker_decision_history(ticker, limit=5)),
         loop.run_in_executor(None, db.get_all_open_positions),
@@ -310,7 +260,6 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
         "ticker":            ticker,
         "current_price":     current_price,
         "atr":               {tf: v.get("atr") for tf, v in all_indicators.items()},
-        "holdings":          holdings,
         "flags":             flags,
         "portfolio_summary": portfolio_summary,
         "settings":          settings,
@@ -380,7 +329,6 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
         "ticker":              ticker,
         "current_price":       current_price,
         "open_position":       enriched_position,   # None if flat, else {side, quantity, entry_price, stop_loss, leverage, unrealized_pnl_pct, unrealized_pnl_usd, time_in_trade_hrs}
-        "current_holdings":    holdings,
         "decision_history":    decision_history,     # last 5 decisions for this ticker, oldest→newest — each includes indicators per timeframe
         "portfolio_summary":   portfolio_summary,
         "technical_analysis":  technical,

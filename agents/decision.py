@@ -14,7 +14,6 @@ You receive:
 - ticker: the asset being analyzed
 - current_price: latest price
 - open_position: the currently open position (null if flat). Contains: side ('long'|'short'), quantity, entry_price, stop_loss, leverage, unrealized_pnl_pct (signed %, positive=winning), unrealized_pnl_usd (dollar P&L), time_in_trade_hrs (hours since entry, null if unknown)
-- current_holdings: what is currently owned (from Kraken balance)
 - decision_history: your last ≤5 decisions for this ticker, oldest→newest. Each entry includes: {ts, action, trigger_flags, decision_reasoning, position_side, executed, indicators} — where indicators is a per-timeframe snapshot (close, rsi, macd_hist, ema_20, ema_50, bb_upper, bb_lower, obv, atr) at the time of that decision. Use this to track how indicators have evolved.
 - portfolio_summary: overall account health snapshot. Contains: starting_capital, realized_pnl, unrealized_pnl, account_equity, open_position_count, available_cash, drawdown_pct (negative = loss from starting capital)
 
@@ -92,7 +91,6 @@ async def analyze(context: dict) -> dict:
       ticker               - str
       current_price        - float
       open_position        - Flat if no position, else {side, quantity, entry_price, stop_loss, leverage}
-      current_holdings     - dict from Kraken balance()
       decision_history     - list of last ≤5 {ts, action, trigger_flags, decision_reasoning, position_side, executed, indicators}
       portfolio_summary    - {starting_capital, realized_pnl, unrealized_pnl, account_equity, open_position_count, available_cash, drawdown_pct}
       technical_analysis   - output from technical agent

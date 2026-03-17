@@ -10,7 +10,6 @@ _SYSTEM_TEMPLATE = """You are a risk management specialist for a trading system.
 
 You receive:
 - ATR (average true range) at multiple timeframes — this is your volatility measure
-- Current portfolio holdings and USD balances
 - The threshold flags that triggered this analysis cycle
 - Risk settings (hard limits from the operator — you MUST NOT exceed these)
 - portfolio_summary: overall account health — starting_capital, realized_pnl, unrealized_pnl, account_equity, open_position_count, available_cash, drawdown_pct
@@ -83,7 +82,6 @@ async def analyze(context: dict) -> dict:
       ticker              - str
       current_price       - float
       atr                 - {timeframe: float} — ATR across timeframes
-      holdings            - dict from Kraken balance()
       flags               - triggered threshold flags
       portfolio_summary   - {starting_capital, realized_pnl, unrealized_pnl, account_equity, open_position_count, available_cash, drawdown_pct}
       settings            - dict from db.get_settings() (optional, falls back to defaults)
