@@ -13,6 +13,12 @@ You receive:
 - Current portfolio holdings and USD balances
 - The threshold flags that triggered this analysis cycle
 - Risk settings (hard limits from the operator — you MUST NOT exceed these)
+- portfolio_summary: overall account health — starting_capital, realized_pnl, unrealized_pnl, account_equity, open_position_count, available_cash, drawdown_pct
+
+PORTFOLIO CONTEXT — use this to adjust your sizing:
+- If drawdown_pct is significant (e.g. < −10%), reduce recommended position sizes proportionally. Do not allow full-size entries when the account is under stress.
+- If available_cash is low relative to starting_capital, recommend smaller sizes to preserve remaining capital.
+- Factor open_position_count into concentration risk: more open positions = less room for new exposure.
 
 === OPERATOR RISK LIMITS (HARD CONSTRAINTS) ===
 {limits_block}
@@ -74,12 +80,13 @@ def _build_system(settings: dict) -> str:
 async def analyze(context: dict) -> dict:
     """
     context keys:
-      ticker         - str
-      current_price  - float
-      atr            - {timeframe: float} — ATR across timeframes
-      holdings       - dict from Kraken balance()
-      flags          - triggered threshold flags
-      settings       - dict from db.get_settings() (optional, falls back to defaults)
+      ticker              - str
+      current_price       - float
+      atr                 - {timeframe: float} — ATR across timeframes
+      holdings            - dict from Kraken balance()
+      flags               - triggered threshold flags
+      portfolio_summary   - {starting_capital, realized_pnl, unrealized_pnl, account_equity, open_position_count, available_cash, drawdown_pct}
+      settings            - dict from db.get_settings() (optional, falls back to defaults)
     """
     import db as _db
     settings = context.get("settings") or _db.get_settings()

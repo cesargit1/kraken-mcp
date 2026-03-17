@@ -119,6 +119,10 @@ async def close_position_stop_loss(
         raw = await loop.run_in_executor(None, lambda: dispatch_tool(tool, args, MODE))
         exec_result = {"raw": raw, "volume": volume, "price": current_price}
 
+    if exec_result.get("error"):
+        print(f"  [STOP-LOSS] {ticker}: execution failed — {exec_result['error']}. Position NOT closed in DB.")
+        return
+
     closed = db.close_position(ticker, current_price, "stop_loss")
     pnl = closed.get("realized_pnl", 0) if closed else 0
     print(f"  [STOP-LOSS] Closed {ticker}. P&L: ${pnl:.2f}")
@@ -251,13 +255,45 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
 
     # Fetch non-social context in parallel — X data is fetched by the social agent itself
     loop = asyncio.get_event_loop()
-    current_price, open_position, holdings, settings, decision_history = await asyncio.gather(
+    current_price, open_position, holdings, settings, decision_history, all_open_positions, realized_pnl = await asyncio.gather(
         loop.run_in_executor(None, lambda: get_current_price(pair, asset_class)),
         loop.run_in_executor(None, lambda: db.get_open_position(ticker)),
         loop.run_in_executor(None, lambda: run_kraken(balance_cmd)),
         loop.run_in_executor(None, db.get_settings),
         loop.run_in_executor(None, lambda: db.get_ticker_decision_history(ticker, limit=5)),
+        loop.run_in_executor(None, db.get_all_open_positions),
+        loop.run_in_executor(None, db.get_realized_pnl),
     )
+
+    # Build portfolio summary for decision + risk agents
+    paper_capital = settings.get("paper_capital", 1000.0)
+    _used_margin = sum(
+        ((p["entry_price"] or 0) * (p["quantity"] or 0)) / max(p.get("leverage") or 1, 1)
+        for p in all_open_positions
+    )
+    _available_cash = paper_capital - _used_margin + realized_pnl
+    _unrealized_pnl = 0.0
+    if current_price and all_open_positions:
+        for p in all_open_positions:
+            ep  = p.get("entry_price") or 0
+            qty = p.get("quantity") or 0
+            lev = p.get("leverage") or 1
+            s   = p.get("side", "long")
+            if ep:
+                # For the current ticker, use current_price; others use entry as estimate
+                cp = current_price if p.get("ticker") == ticker else ep
+                raw = ((cp - ep) / ep) * ep * qty * lev if s == "long" else ((ep - cp) / ep) * ep * qty * lev
+                _unrealized_pnl += raw
+    _account_equity = paper_capital + realized_pnl + _unrealized_pnl
+    portfolio_summary = {
+        "starting_capital":   paper_capital,
+        "realized_pnl":       round(realized_pnl, 2),
+        "unrealized_pnl":     round(_unrealized_pnl, 2),
+        "account_equity":     round(_account_equity, 2),
+        "open_position_count": len(all_open_positions),
+        "available_cash":     round(_available_cash, 2),
+        "drawdown_pct":       round((_account_equity - paper_capital) / paper_capital * 100, 2) if paper_capital else 0,
+    }
 
     # Build per-specialist context payloads (each agent sees only what it needs)
     technical_context = {
@@ -271,12 +307,13 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
         "obv":        {tf: v.get("obv") for tf, v in all_indicators.items()},
     }
     risk_context = {
-        "ticker":        ticker,
-        "current_price": current_price,
-        "atr":           {tf: v.get("atr") for tf, v in all_indicators.items()},
-        "holdings":      holdings,
-        "flags":         flags,
-        "settings":      settings,
+        "ticker":            ticker,
+        "current_price":     current_price,
+        "atr":               {tf: v.get("atr") for tf, v in all_indicators.items()},
+        "holdings":          holdings,
+        "flags":             flags,
+        "portfolio_summary": portfolio_summary,
+        "settings":          settings,
     }
 
     # Run 3 specialists in parallel (~3 sec wall time)
@@ -344,7 +381,8 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
         "current_price":       current_price,
         "open_position":       enriched_position,   # None if flat, else {side, quantity, entry_price, stop_loss, leverage, unrealized_pnl_pct, unrealized_pnl_usd, time_in_trade_hrs}
         "current_holdings":    holdings,
-        "decision_history":    decision_history,     # last 5 decisions for this ticker, oldest→newest
+        "decision_history":    decision_history,     # last 5 decisions for this ticker, oldest→newest — each includes indicators per timeframe
+        "portfolio_summary":   portfolio_summary,
         "technical_analysis":  technical,
         "social_analysis":     social,
         "risk_analysis":       risk,

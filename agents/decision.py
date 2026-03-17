@@ -15,12 +15,28 @@ You receive:
 - current_price: latest price
 - open_position: the currently open position (null if flat). Contains: side ('long'|'short'), quantity, entry_price, stop_loss, leverage, unrealized_pnl_pct (signed %, positive=winning), unrealized_pnl_usd (dollar P&L), time_in_trade_hrs (hours since entry, null if unknown)
 - current_holdings: what is currently owned (from Kraken balance)
-- decision_history: your last ≤5 decisions for this ticker, oldest→newest. Each entry: {ts, action, trigger_flags, decision_reasoning, position_side, executed}
+- decision_history: your last ≤5 decisions for this ticker, oldest→newest. Each entry includes: {ts, action, trigger_flags, decision_reasoning, position_side, executed, indicators} — where indicators is a per-timeframe snapshot (close, rsi, macd_hist, ema_20, ema_50, bb_upper, bb_lower, obv, atr) at the time of that decision. Use this to track how indicators have evolved.
+- portfolio_summary: overall account health snapshot. Contains: starting_capital, realized_pnl, unrealized_pnl, account_equity, open_position_count, available_cash, drawdown_pct (negative = loss from starting capital)
+
+PORTFOLIO AWARENESS — your overarching objective is to grow account equity:
+- portfolio_summary.account_equity is the true measure of success: starting_capital + realized_pnl + unrealized_pnl.
+- If drawdown_pct is significant (e.g. < −10%), be more cautious with new entries — prefer higher-conviction setups and smaller sizes.
+- If the account is in profit, you have a larger cushion — but don't get reckless. Protect gains.
+- Consider available_cash before recommending entries — the system will block you if cash is insufficient, but you should factor it into conviction.
+- When deciding exits, weigh realized_pnl context: locking in a small gain is more valuable when the account is in drawdown.
+
+MULTI-TIMEFRAME INDICATOR TRACKING — use technical_analysis + decision_history.indicators to track evolving trends:
+- technical_analysis gives you the current indicator interpretation. decision_history[].indicators gives you the raw values at each past decision point — compare them to see how RSI, MACD, EMAs, and OBV have evolved.
+- Use higher timeframes (1d, 1w) for trend direction and trade thesis. Use lower timeframes (1h, 4h) for timing entries and exits.
+- A 1h signal is a short-term trade (hours). A 4h signal is a swing trade (1-3 days). A 1d/1w signal is a longer play (days to weeks). Match your holding expectations to the timeframe that drove the entry.
+- If the daily RSI has been steadily rising across the last 3-5 decisions while the weekly MACD histogram is positive, the trend is intact — don't exit on noisy 1h pullbacks.
+- If higher-timeframe indicators are deteriorating (e.g. daily EMA_20 crossing below EMA_50, weekly RSI falling), even a good 1h setup is risky — the macro trend is turning against you.
+- Track OBV across decisions: rising OBV on higher timeframes confirms real accumulation vs. just price noise.
 
 DECISION HISTORY — use this to avoid repeating mistakes and to stay consistent:
 - If you've held multiple consecutive cycles while flat, ask whether the situation has meaningfully changed before holding again.
 - If you entered and the trade failed (was stopped out or closed at a loss), be skeptical of the same thesis recurring immediately after.
-- If a recent exit was triggered, don't re-enter the same direction unless there is fresh evidence that the thesis has reset.
+- Re-entering the same direction after a profitable exit is fine if the trend is still intact and fresh signals support it.
 - Do NOT anchor to a past decision — evaluate the current state on its own merits, informed by history.
 
 POSITION STATE RULES — these are hard constraints, not judgment calls:
@@ -77,7 +93,8 @@ async def analyze(context: dict) -> dict:
       current_price        - float
       open_position        - Flat if no position, else {side, quantity, entry_price, stop_loss, leverage}
       current_holdings     - dict from Kraken balance()
-      decision_history     - list of last ≤5 {ts, action, trigger_flags, decision_reasoning, position_side, executed}
+      decision_history     - list of last ≤5 {ts, action, trigger_flags, decision_reasoning, position_side, executed, indicators}
+      portfolio_summary    - {starting_capital, realized_pnl, unrealized_pnl, account_equity, open_position_count, available_cash, drawdown_pct}
       technical_analysis   - output from technical agent
       social_analysis      - output from social agent
       risk_analysis        - output from risk agent

@@ -242,18 +242,44 @@ def get_recent_agent_runs(limit: int = 50, offset: int = 0) -> dict:
     return {"data": r.data or [], "total": r.count or 0}
 
 
+def _slim_indicators(snap: dict | None) -> dict | None:
+    """Extract key indicator values per timeframe from a full indicators snapshot.
+    Keeps the payload small enough for LLM context while preserving trend memory."""
+    if not snap or not isinstance(snap, dict):
+        return None
+    slim = {}
+    for tf, v in snap.items():
+        if not isinstance(v, dict):
+            continue
+        slim[tf] = {
+            "close":       v.get("latest_close") or v.get("close"),
+            "rsi":         v.get("rsi"),
+            "macd_hist":   v.get("macd_hist"),
+            "ema_20":      v.get("ema_20"),
+            "ema_50":      v.get("ema_50"),
+            "bb_upper":    v.get("bb_upper"),
+            "bb_lower":    v.get("bb_lower"),
+            "obv":         v.get("obv"),
+            "atr":         v.get("atr"),
+        }
+    return slim
+
+
 def get_ticker_decision_history(ticker: str, limit: int = 5) -> list[dict]:
     """Return the last N decision-agent runs for a ticker as compact history entries.
     Used to give the decision agent memory of its own recent decisions."""
     r = _exec(lambda: (
         get_client().table("agent_log")
-        .select("ts,action,trigger_flags,decision_reasoning,position_side,executed")
+        .select("ts,action,trigger_flags,decision_reasoning,position_side,executed,indicators_snapshot")
         .eq("ticker", ticker)
         .order("ts", desc=True)
         .limit(limit)
         .execute()
     ))
     rows = r.data or []
+    # Slim down indicator snapshots to key values per timeframe
+    for row in rows:
+        row["indicators"] = _slim_indicators(row.pop("indicators_snapshot", None))
     # Return in chronological order (oldest first) so the LLM reads them as a timeline
     return list(reversed(rows))
 
@@ -415,40 +441,24 @@ def open_position(
     leverage: int,
     agent_log_id: int,
 ) -> None:
-    """Insert a new open position, or merge into an existing one (quantity-weighted avg entry)."""
-    existing = get_open_position(ticker)
-    if existing and existing.get("side") == side:
-        # Merge: quantity-weighted average entry price, summed quantity
-        old_qty   = existing["quantity"]
-        old_entry = existing["entry_price"]
-        new_qty   = old_qty + quantity
-        new_entry = round((old_entry * old_qty + entry_price * quantity) / new_qty, 6)
-        get_client().table("positions").update(
-            {
-                "quantity":      new_qty,
-                "entry_price":   new_entry,
-                "stop_loss":     stop_loss or existing.get("stop_loss"),
-                "agent_log_id":  agent_log_id,  # latest agent run id
-            }
-        ).eq("ticker", ticker).is_("closed_at", "null").execute()
-    else:
-        get_client().table("positions").insert(
-            {
-                "ticker":        ticker,
-                "side":          side,
-                "quantity":      quantity,
-                "entry_price":   entry_price,
-                "stop_loss":     stop_loss,
-                "high_water_price": entry_price,
-                "leverage":      leverage,
-                "agent_log_id":  agent_log_id,
-                "opened_at":     datetime.now(timezone.utc).isoformat(),
-                "closed_at":     None,
-                "close_price":   None,
-                "realized_pnl":  None,
-                "close_reason":  None,
-            },
-        ).execute()
+    """Insert a new open position."""
+    get_client().table("positions").insert(
+        {
+            "ticker":        ticker,
+            "side":          side,
+            "quantity":      quantity,
+            "entry_price":   entry_price,
+            "stop_loss":     stop_loss,
+            "high_water_price": entry_price,
+            "leverage":      leverage,
+            "agent_log_id":  agent_log_id,
+            "opened_at":     datetime.now(timezone.utc).isoformat(),
+            "closed_at":     None,
+            "close_price":   None,
+            "realized_pnl":  None,
+            "close_reason":  None,
+        },
+    ).execute()
 
 
 def update_trailing_stop(ticker: str, current_price: float, new_stop: float) -> None:
