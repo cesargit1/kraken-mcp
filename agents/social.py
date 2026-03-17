@@ -1,10 +1,11 @@
 """
 agents/social.py — Social sentiment specialist.
-Receives X posts and OBV data. Returns structured JSON sentiment signal.
+Fetches its own X data, then returns structured JSON sentiment signal.
 Does NOT see: price charts, RSI, MACD, technical patterns, or holdings.
 """
 
-from core import run_analyst_async
+import asyncio
+from core import run_analyst_async, search_x, build_x_query
 
 SYSTEM = """You are a social media sentiment analyst for a trading system. You analyze X (Twitter) posts and on-balance volume data to detect sentiment and social momentum.
 
@@ -36,8 +37,20 @@ Respond with ONLY a valid JSON object — no markdown, no explanation outside th
 async def analyze(context: dict) -> dict:
     """
     context keys:
-      ticker   - str
-      x_posts  - str (raw text from search_x)
-      obv      - {timeframe: float} — OBV values across timeframes
+      ticker_row - full watchlist row (for building the X query)
+      obv        - {timeframe: float} — OBV values across timeframes
     """
-    return await run_analyst_async(SYSTEM, context)
+    ticker_row = context["ticker_row"]
+    obv        = context.get("obv", {})
+
+    # Fetch X posts directly — social agent owns this data, not the orchestrator
+    loop = asyncio.get_event_loop()
+    x_query = build_x_query(ticker_row)
+    x_posts = await loop.run_in_executor(None, lambda: search_x(x_query))
+
+    llm_context = {
+        "ticker":  ticker_row["ticker"],
+        "x_posts": x_posts,
+        "obv":     obv,
+    }
+    return await run_analyst_async(SYSTEM, llm_context)

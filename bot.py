@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from core import run_kraken, search_x, dispatch_tool, Mode, MODE, build_x_query
+from core import run_kraken, dispatch_tool, Mode, MODE
 import db
 import fetch as fetcher
 import indicators as ind
@@ -243,16 +243,13 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
         db.set_cooldown(ticker, flag)
     update_ticker_state(ticker, stage="context_fetch")
 
-    # Prepare query strings before parallel fetch
-    x_query = build_x_query(ticker_row)
     balance_cmd = ["paper", "balance"] if MODE == Mode.PAPER else ["balance"]
 
-    # Fetch all context in parallel (~3-5s wall time instead of ~15s sequential)
+    # Fetch non-social context in parallel — X data is fetched by the social agent itself
     loop = asyncio.get_event_loop()
-    current_price, open_position, x_data, holdings, settings = await asyncio.gather(
+    current_price, open_position, holdings, settings = await asyncio.gather(
         loop.run_in_executor(None, lambda: get_current_price(pair, asset_class)),
         loop.run_in_executor(None, lambda: db.get_open_position(ticker)),
-        loop.run_in_executor(None, lambda: search_x(x_query)),
         loop.run_in_executor(None, lambda: run_kraken(balance_cmd)),
         loop.run_in_executor(None, db.get_settings),
     )
@@ -265,9 +262,8 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
         "flags":         flags,
     }
     social_context = {
-        "ticker":  ticker,
-        "x_posts": x_data,
-        "obv":     {tf: v.get("obv") for tf, v in all_indicators.items()},
+        "ticker_row": ticker_row,
+        "obv":        {tf: v.get("obv") for tf, v in all_indicators.items()},
     }
     risk_context = {
         "ticker":        ticker,
