@@ -242,6 +242,22 @@ def get_recent_agent_runs(limit: int = 50, offset: int = 0) -> dict:
     return {"data": r.data or [], "total": r.count or 0}
 
 
+def get_ticker_decision_history(ticker: str, limit: int = 5) -> list[dict]:
+    """Return the last N decision-agent runs for a ticker as compact history entries.
+    Used to give the decision agent memory of its own recent decisions."""
+    r = _exec(lambda: (
+        get_client().table("agent_log")
+        .select("ts,action,trigger_flags,decision_reasoning,position_side,executed")
+        .eq("ticker", ticker)
+        .order("ts", desc=True)
+        .limit(limit)
+        .execute()
+    ))
+    rows = r.data or []
+    # Return in chronological order (oldest first) so the LLM reads them as a timeline
+    return list(reversed(rows))
+
+
 def get_agent_run_by_id(agent_log_id: int) -> dict | None:
     """Return a single agent_log row with all columns including specialist analysis blobs."""
     r = (

@@ -15,6 +15,13 @@ You receive:
 - current_price: latest price
 - open_position: the currently open position (null if flat). Contains: side ('long'|'short'), quantity, entry_price, stop_loss, leverage, unrealized_pnl_pct (signed %, positive=winning), unrealized_pnl_usd (dollar P&L), time_in_trade_hrs (hours since entry, null if unknown)
 - current_holdings: what is currently owned (from Kraken balance)
+- decision_history: your last ≤5 decisions for this ticker, oldest→newest. Each entry: {ts, action, trigger_flags, decision_reasoning, position_side, executed}
+
+DECISION HISTORY — use this to avoid repeating mistakes and to stay consistent:
+- If you've held multiple consecutive cycles while flat, ask whether the situation has meaningfully changed before holding again.
+- If you entered and the trade failed (was stopped out or closed at a loss), be skeptical of the same thesis recurring immediately after.
+- If a recent exit was triggered, don't re-enter the same direction unless there is fresh evidence that the thesis has reset.
+- Do NOT anchor to a past decision — evaluate the current state on its own merits, informed by history.
 
 POSITION STATE RULES — these are hard constraints, not judgment calls:
 1. If open_position is null (flat): you may open a new position (buy/short) or hold.
@@ -70,6 +77,7 @@ async def analyze(context: dict) -> dict:
       current_price        - float
       open_position        - Flat if no position, else {side, quantity, entry_price, stop_loss, leverage}
       current_holdings     - dict from Kraken balance()
+      decision_history     - list of last ≤5 {ts, action, trigger_flags, decision_reasoning, position_side, executed}
       technical_analysis   - output from technical agent
       social_analysis      - output from social agent
       risk_analysis        - output from risk agent

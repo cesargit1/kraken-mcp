@@ -251,11 +251,12 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
 
     # Fetch non-social context in parallel — X data is fetched by the social agent itself
     loop = asyncio.get_event_loop()
-    current_price, open_position, holdings, settings = await asyncio.gather(
+    current_price, open_position, holdings, settings, decision_history = await asyncio.gather(
         loop.run_in_executor(None, lambda: get_current_price(pair, asset_class)),
         loop.run_in_executor(None, lambda: db.get_open_position(ticker)),
         loop.run_in_executor(None, lambda: run_kraken(balance_cmd)),
         loop.run_in_executor(None, db.get_settings),
+        loop.run_in_executor(None, lambda: db.get_ticker_decision_history(ticker, limit=5)),
     )
 
     # Build per-specialist context payloads (each agent sees only what it needs)
@@ -343,6 +344,7 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
         "current_price":       current_price,
         "open_position":       enriched_position,   # None if flat, else {side, quantity, entry_price, stop_loss, leverage, unrealized_pnl_pct, unrealized_pnl_usd, time_in_trade_hrs}
         "current_holdings":    holdings,
+        "decision_history":    decision_history,     # last 5 decisions for this ticker, oldest→newest
         "technical_analysis":  technical,
         "social_analysis":     social,
         "risk_analysis":       risk,
