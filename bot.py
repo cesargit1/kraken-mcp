@@ -187,7 +187,7 @@ async def execute_trade(ticker_row: dict, decision: dict, current_price: float) 
 # Per-ticker AI pipeline
 # ---------------------------------------------------------------------------
 
-async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dict, timer_driven: bool = False) -> None:
+async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dict, timer_driven: bool = False, current_price: float | None = None) -> None:
     ticker      = ticker_row["ticker"]
     pair        = ticker_row.get("pair", ticker)
     asset_class = ticker_row.get("asset_class", "spot")
@@ -205,15 +205,26 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
     update_ticker_state(ticker, stage="context_fetch")
 
     # Fetch non-social context in parallel — X data is fetched by the social agent itself
+    # current_price may already be passed in from _process_one_ticker to avoid redundant CLI calls
     loop = asyncio.get_event_loop()
-    current_price, open_position, settings, decision_history, all_open_positions, realized_pnl = await asyncio.gather(
-        loop.run_in_executor(None, lambda: get_current_price(pair, asset_class)),
-        loop.run_in_executor(None, lambda: db.get_open_position(ticker)),
-        loop.run_in_executor(None, db.get_settings),
-        loop.run_in_executor(None, lambda: db.get_ticker_decision_history(ticker, limit=5)),
-        loop.run_in_executor(None, db.get_all_open_positions),
-        loop.run_in_executor(None, db.get_realized_pnl),
-    )
+    fetches = {
+        "open_position":    loop.run_in_executor(None, lambda: db.get_open_position(ticker)),
+        "settings":         loop.run_in_executor(None, db.get_settings),
+        "decision_history": loop.run_in_executor(None, lambda: db.get_ticker_decision_history(ticker, limit=5)),
+        "all_open":         loop.run_in_executor(None, db.get_all_open_positions),
+        "realized_pnl":     loop.run_in_executor(None, db.get_realized_pnl),
+    }
+    if current_price is None:
+        fetches["price"] = loop.run_in_executor(None, lambda: get_current_price(pair, asset_class))
+    results = await asyncio.gather(*fetches.values())
+    fetch_map = dict(zip(fetches.keys(), results))
+    if current_price is None:
+        current_price = fetch_map["price"]
+    open_position      = fetch_map["open_position"]
+    settings           = fetch_map["settings"]
+    decision_history   = fetch_map["decision_history"]
+    all_open_positions = fetch_map["all_open"]
+    realized_pnl       = fetch_map["realized_pnl"]
 
     # Build portfolio summary for decision + risk agents
     paper_capital = settings.get("paper_capital", 1000.0)
@@ -652,7 +663,7 @@ async def _process_one_ticker(ticker_row: dict) -> None:
         # 8. Trigger AI if there are new flags or timer expired
         if active_flags or timer_expired:
             update_ticker_state(ticker, stage="ai_pipeline", active_flags=active_flags, timer_expired=timer_expired)
-            await process_ticker(ticker_row, active_flags, all_indicators, timer_driven=timer_expired)
+            await process_ticker(ticker_row, active_flags, all_indicators, timer_driven=timer_expired, current_price=current_price)
         else:
             skip_msg = f"no new flags, not yet due (last AI: {last_ai.strftime('%H:%M') if last_ai else 'never'})"
             print(f"  [skip] {ticker}: {skip_msg}")
