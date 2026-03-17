@@ -126,7 +126,9 @@ CREATE TABLE IF NOT EXISTS positions (
     closed_at       TIMESTAMPTZ,
     close_price     FLOAT,
     realized_pnl    FLOAT,                        -- matches transaction_ledger.realized_pnl
-    close_reason    TEXT                          -- 'stop_loss' | 'ai_signal' | 'manual'
+    close_reason    TEXT,                         -- 'stop_loss' | 'ai_signal' | 'manual'
+    total_fees      FLOAT,                        -- entry + exit trading fees
+    margin_cost     FLOAT                         -- accrued interest on borrowed capital
 );
 
 -- Migration: rename positions columns to match transaction_ledger terminology
@@ -138,6 +140,8 @@ CREATE TABLE IF NOT EXISTS positions (
 -- ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS poll_interval_sec INTEGER DEFAULT 300;
 -- ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS ai_timer_min INTEGER DEFAULT 60;
 -- ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS cooldown_min INTEGER DEFAULT 30;
+-- ALTER TABLE positions ADD COLUMN IF NOT EXISTS total_fees FLOAT;
+-- ALTER TABLE positions ADD COLUMN IF NOT EXISTS margin_cost FLOAT;
 -- Enforces at most one open position per ticker while allowing many closed rows.
 CREATE UNIQUE INDEX IF NOT EXISTS positions_open ON positions (ticker) WHERE closed_at IS NULL;
 

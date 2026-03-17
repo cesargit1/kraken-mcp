@@ -487,19 +487,23 @@ def close_position(ticker: str, close_price: float, close_reason: str) -> Option
     margin_c = calc_margin_cost(entry_notional, lev, pos.get("opened_at"))
     pnl = raw_pnl - fee_in - fee_out - margin_c
     now = datetime.now(timezone.utc).isoformat()
+    total_fees = round(fee_in + fee_out, 6)
+    margin_cost = round(margin_c, 6)
     get_client().table("positions").update({
         "closed_at":     now,
         "close_price":   close_price,
         "realized_pnl":  round(pnl, 2),
         "close_reason":  close_reason,
+        "total_fees":    total_fees,
+        "margin_cost":   margin_cost,
     }).eq("ticker", ticker).is_("closed_at", "null").execute()
     return {
         **pos,
         "closed_at":    now,
         "close_price":  close_price,
         "realized_pnl": round(pnl, 2),
-        "total_fees":   round(fee_in + fee_out, 6),
-        "margin_cost":  round(margin_c, 6),
+        "total_fees":   total_fees,
+        "margin_cost":  margin_cost,
     }
 
 
@@ -550,6 +554,17 @@ def get_closed_positions_full(limit: int = 50) -> list[dict]:
     Returned list is sorted by closed_at desc, capped at `limit`.
     """
     real = get_closed_positions(limit)
+
+    # Back-fill total_fees / margin_cost for rows closed before those columns existed
+    for p in real:
+        if p.get("total_fees") is None:
+            entry_notional = (p.get("entry_price") or 0) * (p.get("quantity") or 0)
+            close_notional = (p.get("close_price") or 0) * (p.get("quantity") or 0)
+            p["total_fees"] = round(calc_trade_fee(entry_notional) + calc_trade_fee(close_notional), 6)
+        if p.get("margin_cost") is None:
+            entry_notional = (p.get("entry_price") or 0) * (p.get("quantity") or 0)
+            lev = p.get("leverage") or 1
+            p["margin_cost"] = round(calc_margin_cost(entry_notional, lev, p.get("opened_at"), p.get("closed_at")), 6)
 
     # Build a dedup key set from real rows (ticker + minute-level timestamp)
     def _min(ts: str) -> str:
