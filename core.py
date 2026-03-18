@@ -1,6 +1,6 @@
 """
-core.py — shared runtime for all Kraken trading strategies.
-Handles: Grok-4 client, kraken-cli execution, tool dispatch, mode switching (paper/live).
+core.py — shared runtime for the Kraken paper trading bot.
+Handles: Grok-4 client, kraken-cli execution, tool dispatch (paper only).
 """
 
 import os
@@ -17,14 +17,13 @@ from retry import retry_call
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Mode
+# Mode (paper only — there is no live trading)
 # ---------------------------------------------------------------------------
 
 class Mode(str, Enum):
     PAPER = "paper"
-    LIVE  = "live"
 
-MODE = Mode(os.getenv("TRADING_MODE", "paper"))
+MODE = Mode.PAPER
 _default_bin = os.path.expanduser("~/.cargo/bin/kraken")
 KRAKEN_BIN = _default_bin if os.path.isfile(_default_bin) else (shutil.which("kraken") or _default_bin)
 
@@ -128,8 +127,8 @@ def run_kraken(args: list[str]) -> dict:
 # Unified tool dispatcher — paper or live
 # ---------------------------------------------------------------------------
 
-def dispatch_tool(name: str, args: dict, mode: Mode = MODE) -> str:
-    """Route tool calls to paper or live kraken-cli commands."""
+def dispatch_tool(name: str, args: dict) -> str:
+    """Route tool calls to paper kraken-cli commands."""
 
     asset_flags = []
     if args.get("asset_class") and args["asset_class"] != "spot":
@@ -153,51 +152,30 @@ def dispatch_tool(name: str, args: dict, mode: Mode = MODE) -> str:
             cmd += ["--interval", str(args["interval"])]
 
     elif name == "balance":
-        if mode == Mode.PAPER:
-            cmd = ["paper", "balance"]
-        else:
-            cmd = ["balance"]
+        cmd = ["paper", "balance"]
 
     elif name == "buy":
         vol = str(args["volume"])
         leverage_flags = ["--leverage", str(args["leverage"])] if args.get("leverage", 1) > 1 else []
-        if mode == Mode.PAPER:
-            cmd = ["paper", "buy", args["pair"], vol] + limit_flags + leverage_flags
-        else:
-            cmd = ["order", "buy", args["pair"], vol] + limit_flags + leverage_flags + asset_flags
+        cmd = ["paper", "buy", args["pair"], vol] + limit_flags + leverage_flags
 
     elif name == "sell":
         vol = str(args["volume"])
         leverage_flags = ["--leverage", str(args["leverage"])] if args.get("leverage", 1) > 1 else []
         reduce_flags = ["--reduce-only"] if args.get("reduce_only") else []
-        if mode == Mode.PAPER:
-            cmd = ["paper", "sell", args["pair"], vol] + limit_flags + leverage_flags + reduce_flags
-        else:
-            cmd = ["order", "sell", args["pair"], vol] + limit_flags + leverage_flags + reduce_flags + asset_flags
+        cmd = ["paper", "sell", args["pair"], vol] + limit_flags + leverage_flags + reduce_flags
 
     elif name == "cancel_order":
-        if mode == Mode.PAPER:
-            cmd = ["paper", "cancel", args["order_id"]]
-        else:
-            cmd = ["order", "cancel", args["order_id"]]
+        cmd = ["paper", "cancel", args["order_id"]]
 
     elif name == "open_orders":
-        if mode == Mode.PAPER:
-            cmd = ["paper", "orders"]
-        else:
-            cmd = ["open-orders"]
+        cmd = ["paper", "orders"]
 
     elif name == "status":
-        if mode == Mode.PAPER:
-            cmd = ["paper", "status"]
-        else:
-            cmd = ["balance"]
+        cmd = ["paper", "status"]
 
     elif name == "trade_history":
-        if mode == Mode.PAPER:
-            cmd = ["paper", "history"]
-        else:
-            cmd = ["trades-history"]
+        cmd = ["paper", "history"]
 
     else:
         return json.dumps({"error": f"unknown tool: {name}"})
@@ -422,7 +400,7 @@ async def run_analyst_async(system_prompt: str, context: dict, model: str = MODE
     return await loop.run_in_executor(None, lambda: run_analyst(system_prompt, context, model))
 
 
-def run_agent(system_prompt: str, user_prompt: str, mode: Mode = MODE, verbose: bool = True, model: str = MODEL) -> str:
+def run_agent(system_prompt: str, user_prompt: str, verbose: bool = True, model: str = MODEL) -> str:
     """
     Run a single agent turn with full tool-call loop.
     Returns the final text response.
@@ -449,9 +427,8 @@ def run_agent(system_prompt: str, user_prompt: str, mode: Mode = MODE, verbose: 
             args = json.loads(tc.function.arguments)
             if verbose:
                 arg_str = ", ".join(f"{k}={v}" for k, v in args.items())
-                tag = f"[{mode.upper()}]" if mode == Mode.LIVE else "[paper]"
-                print(f"  \033[90m{tag} {tc.function.name}({arg_str})\033[0m", flush=True)
-            result = dispatch_tool(tc.function.name, args, mode)
+                print(f"  \033[90m[paper] {tc.function.name}({arg_str})\033[0m", flush=True)
+            result = dispatch_tool(tc.function.name, args)
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,

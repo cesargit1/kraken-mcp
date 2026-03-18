@@ -24,7 +24,7 @@ import db
 import fetch as fetcher
 import indicators as ind
 import bot
-from core import run_kraken, search_x, search_x_stream, Mode, MODE
+from core import run_kraken, search_x, search_x_stream
 from agents.technical import analyze as technical_analyze
 from agents.social    import analyze as social_analyze
 from agents.risk      import analyze as risk_analyze
@@ -261,6 +261,7 @@ async def api_positions():
                 lambda r=row: bot.get_current_price(
                     r.get("pair", r["ticker"]),
                     r.get("asset_class", "spot"),
+                    r["ticker"],
                 ),
             )
             return row["ticker"], p
@@ -365,7 +366,7 @@ async def api_positions():
     }
 
     return {
-        "mode":             MODE.value,
+        "mode":             "paper",
         "summary":          summary,
         "settings":         settings,
         "open_positions":   open_positions,

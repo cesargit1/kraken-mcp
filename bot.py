@@ -1,5 +1,5 @@
 """
-bot.py — Main async trading loop.
+bot.py — Main async trading loop (paper trading only).
 
 Fast loop (every 5 min, no AI):
   - Fetch new candles
@@ -13,11 +13,11 @@ Event-triggered AI (per flagged ticker):
   - 1 decision agent synthesizing all three
   - Log to Supabase + simulate trade in DB
 
-All trades are simulated internally (DB-tracked). Kraken is used only for pricing.
+All trades are paper-simulated (DB-tracked only). No orders are ever submitted
+to Kraken or any other exchange. Kraken CLI is used for pricing and candle data only.
 
 Usage:
-  python3 bot.py              # paper mode (default)
-  TRADING_MODE=live python3 bot.py
+  python3 bot.py
 """
 
 import asyncio
@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from core import run_kraken, Mode, MODE
+from core import run_kraken
 import db
 import fetch as fetcher
 import indicators as ind
@@ -147,7 +147,7 @@ async def close_position_stop_loss(
         fee=db.calc_trade_fee(_close_notional),
         pair=ticker_row.get("pair"),
         order_type="market",
-        source_type="paper" if MODE == Mode.PAPER else "spot",
+        source_type="paper",
         is_simulated=exec_result.get("simulated", False),
         execution_result=exec_result,
     )
@@ -626,7 +626,7 @@ async def fast_loop() -> None:
 
     update_cycle_state(poll_interval_sec=POLL_INTERVAL_SEC)
 
-    mode_label = "LIVE" if MODE == Mode.LIVE else "paper"
+    mode_label = "paper"
     print(f"[bot] Starting — mode={mode_label}  poll={POLL_INTERVAL_SEC}s  ai_timer={AI_TIMER_MIN}min  cooldown={COOLDOWN_MIN}min")
 
     while True:
