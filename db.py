@@ -337,6 +337,7 @@ def log_transaction(
     side = "buy" if action in ("buy", "cover") else "sell"
     tx_type = "trade"
     status = "failed" if (execution_result or {}).get("error") else "completed"
+    leverage = leverage or 1  # guard against None from AI returning null
     get_client().table("transaction_ledger").insert(
         {
             "agent_log_id":      agent_log_id,
