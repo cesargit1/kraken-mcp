@@ -476,7 +476,7 @@ def close_position(ticker: str, close_price: float, close_reason: str) -> Option
         return None
     quantity = pos["quantity"]
     entry    = pos["entry_price"]
-    lev      = pos["leverage"]
+    lev      = pos.get("leverage") or 1
     raw_pnl = (
         (close_price - entry) * quantity * lev if pos["side"] == "long"
         else (entry - close_price) * quantity * lev

@@ -279,17 +279,18 @@ async def api_positions():
         entry    = pos.get("entry_price") or 0
         current  = prices.get(ticker)
         volume   = pos.get("quantity") or 0
-        lev      = pos.get("leverage", 1)
+        lev      = pos.get("leverage") or 1  # 'or 1' handles None from nullable DB column
         side     = pos.get("side", "long")
+        notional    = entry * volume
+        margin_cost = round(db.calc_margin_cost(notional, lev, pos.get("opened_at")), 6)
+        entry_fee   = round(db.calc_trade_fee(notional), 6)
         pnl = None
         if current and entry and volume:
-            pnl = round(
+            raw_pnl = (
                 (current - entry) * volume * lev if side == "long"
-                else (entry - current) * volume * lev,
-                2,
+                else (entry - current) * volume * lev
             )
-        notional    = entry * volume
-        margin_cost = round(db.calc_margin_cost(notional, lev, pos.get("opened_at")), 2)
+            pnl = round(raw_pnl - margin_cost - entry_fee, 2)
         open_positions.append({
             "ticker":        ticker,
             "action":        side,
@@ -303,7 +304,8 @@ async def api_positions():
             "reasoning":     "",    # fetched separately below
             "opened_at":     pos.get("opened_at"),
             "trade_id":      pos.get("agent_log_id"),
-            "margin_cost":   margin_cost,
+            "margin_cost":   round(margin_cost, 2),
+            "entry_fee":     round(entry_fee, 2),
         })
 
     # Enrich reasoning from agent_log
