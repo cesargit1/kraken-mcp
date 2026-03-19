@@ -103,7 +103,7 @@ def sse(data: dict) -> str:
 
 _CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
     "connect-src 'self'; "
     "img-src 'self' data:; "
@@ -376,6 +376,19 @@ async def api_positions():
         "recent_trades":    trades,
         "prices":           prices,
     }
+
+
+@app.get("/api/candles")
+async def api_candles(ticker: str, timeframe: str = "1h", limit: int = 200):
+    """Return OHLCV candles for a ticker/timeframe from the DB."""
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+    if timeframe not in ("1h", "4h", "1d", "1w"):
+        raise HTTPException(status_code=400, detail="timeframe must be one of: 1h, 4h, 1d, 1w")
+    cap = min(max(int(limit), 1), 500)
+    loop = asyncio.get_running_loop()
+    candles = await loop.run_in_executor(None, lambda: db.get_candle_window(ticker, timeframe, cap))
+    return {"ticker": ticker, "timeframe": timeframe, "candles": candles}
 
 
 @app.get("/api/settings")
@@ -682,7 +695,7 @@ async def api_bot_status():
 @app.get("/api/agent-history")
 async def api_agent_history(page: int = 1):
     """Return paginated agent log entries (summary columns only — no heavy JSON blobs)."""
-    per_page = 40
+    per_page = 25
     if page < 1:
         page = 1
     offset = (page - 1) * per_page

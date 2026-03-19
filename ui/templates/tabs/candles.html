@@ -1,0 +1,37 @@
+<!-- ══════════════ CANDLES TAB ══════════════ -->
+<div id="tab-candles" class="tab-panel">
+  <div class="mx-auto max-w-7xl">
+
+    <!-- Header controls -->
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+      <h1 class="text-base/7 font-semibold text-white">Candles</h1>
+
+      <!-- Ticker selector -->
+      <select id="candles-ticker-select"
+              class="rounded-md bg-white/5 py-1.5 pl-3 pr-8 text-sm text-white outline outline-1 -outline-offset-1 outline-white/10 *:bg-gray-800 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-500"
+              onchange="onCandlesTickerChange()">
+        <option value="">Loading…</option>
+      </select>
+
+      <!-- Timeframe buttons -->
+      <div class="flex gap-1">
+        <button class="candles-tf-btn"        data-tf="1h"  onclick="onCandlesTfChange('1h',  this)">1h</button>
+        <button class="candles-tf-btn"        data-tf="4h"  onclick="onCandlesTfChange('4h',  this)">4h</button>
+        <button class="candles-tf-btn active" data-tf="1d"  onclick="onCandlesTfChange('1d',  this)">1d</button>
+        <button class="candles-tf-btn"        data-tf="1w"  onclick="onCandlesTfChange('1w',  this)">1w</button>
+      </div>
+
+      <!-- Status / last updated -->
+      <span id="candles-status" class="text-xs text-gray-500 ml-auto"></span>
+    </div>
+
+    <!-- OHLCV stats row -->
+    <div id="candles-stats" class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-3"></div>
+
+    <!-- Chart container — Lightweight Charts renders here -->
+    <div class="rounded-lg border border-white/10 overflow-hidden" style="background:#131722">
+      <div id="candles-chart" style="width:100%;height:500px"></div>
+    </div>
+
+  </div>
+</div>

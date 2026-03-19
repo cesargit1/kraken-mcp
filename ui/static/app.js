@@ -53,6 +53,7 @@ function switchTab(name, clickedEl) {
   if (name === 'watchlist') loadWatchlist();
   if (name === 'settings')  loadSettings();
   if (name === 'agent')     loadHistory();
+  if (name === 'candles')   loadCandles();
 }
 
 // ─────────────────────────────────────────────
@@ -1164,6 +1165,181 @@ function toggleLiveRow(lid) {
   detail.style.display = isOpen ? 'none' : 'table-row';
   if (chevron) chevron.style.transform = isOpen ? '' : 'rotate(90deg)';
 }
+
+// ─────────────────────────────────────────────
+// Candles tab
+// ─────────────────────────────────────────────
+let _candlesChart = null;
+let _candlesSeries = null;
+let _candlesVolSeries = null;
+let _candlesResizeObs = null;
+let _candlesTf = '1d';
+
+const _TF_LIMITS = { '1h': 200, '4h': 100, '1d': 100, '1w': 52 };
+
+async function loadCandles() {
+  const select = document.getElementById('candles-ticker-select');
+  const status = document.getElementById('candles-status');
+  if (!select) return;
+
+  // Populate ticker dropdown on first visit
+  if (select.options.length === 0 || (select.options.length === 1 && select.options[0].value === '')) {
+    try {
+      const res  = await fetch('/api/watchlist');
+      const rows = await res.json();
+      const active = rows.filter(r => r.active);
+      if (!active.length) {
+        status.textContent = 'No active tickers in watchlist';
+        return;
+      }
+      select.innerHTML = active.map(r =>
+        `<option value="${esc(r.ticker)}">${esc(r.ticker)}</option>`
+      ).join('');
+    } catch (e) {
+      status.textContent = '⚠ Could not load watchlist';
+      return;
+    }
+  }
+
+  const ticker = select.value;
+  if (ticker) await _fetchAndRenderCandles(ticker, _candlesTf);
+}
+
+async function onCandlesTickerChange() {
+  const ticker = document.getElementById('candles-ticker-select').value;
+  if (ticker) await _fetchAndRenderCandles(ticker, _candlesTf);
+}
+
+async function onCandlesTfChange(tf, btn) {
+  _candlesTf = tf;
+  document.querySelectorAll('.candles-tf-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const ticker = document.getElementById('candles-ticker-select').value;
+  if (ticker) await _fetchAndRenderCandles(ticker, tf);
+}
+
+async function _fetchAndRenderCandles(ticker, tf) {
+  const status = document.getElementById('candles-status');
+  status.textContent = 'Loading…';
+  try {
+    const limit = _TF_LIMITS[tf] || 100;
+    const res = await fetch(`/api/candles?ticker=${encodeURIComponent(ticker)}&timeframe=${encodeURIComponent(tf)}&limit=${limit}`);
+    if (!res.ok) throw new Error(await res.text());
+    const data    = await res.json();
+    const candles = data.candles || [];
+    if (!candles.length) {
+      status.textContent = 'No candle data available for this ticker/timeframe';
+      document.getElementById('candles-stats').innerHTML = '';
+      return;
+    }
+    _renderCandleChart(candles);
+    _renderCandleStats(candles[candles.length - 1]);
+    const last = candles[candles.length - 1];
+    status.textContent = `${candles.length} candles \u00b7 last: ${fmtDate(last.ts)}`;
+  } catch (e) {
+    status.textContent = '\u26a0 ' + e.message;
+  }
+}
+
+function _renderCandleChart(candles) {
+  const container = document.getElementById('candles-chart');
+  if (!container) return;
+
+  // Tear down existing chart + observer
+  if (_candlesResizeObs) { _candlesResizeObs.disconnect(); _candlesResizeObs = null; }
+  if (_candlesChart)     { _candlesChart.remove();          _candlesChart     = null; }
+
+  if (typeof LightweightCharts === 'undefined') {
+    container.innerHTML = '<div class="p-6 text-sm text-gray-400">Chart library not loaded yet \u2014 please refresh the page.</div>';
+    return;
+  }
+
+  _candlesChart = LightweightCharts.createChart(container, {
+    layout: {
+      background: { type: 'solid', color: '#131722' },
+      textColor: '#9ca3af',
+    },
+    grid: {
+      vertLines: { color: 'rgba(255,255,255,0.04)' },
+      horzLines: { color: 'rgba(255,255,255,0.04)' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+    timeScale: {
+      borderColor: 'rgba(255,255,255,0.1)',
+      timeVisible: true,
+      secondsVisible: false,
+    },
+    width:  container.clientWidth,
+    height: 500,
+  });
+
+  // Candlestick series (main pane)
+  _candlesSeries = _candlesChart.addCandlestickSeries({
+    upColor:        '#22c55e',
+    downColor:      '#ef4444',
+    borderVisible:  false,
+    wickUpColor:    '#22c55e',
+    wickDownColor:  '#ef4444',
+  });
+
+  // Volume histogram (overlay, bottom 20% of chart)
+  _candlesVolSeries = _candlesChart.addHistogramSeries({
+    priceFormat:  { type: 'volume' },
+    priceScaleId: 'vol',
+    scaleMargins: { top: 0.82, bottom: 0 },
+  });
+  _candlesChart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+
+  const ohlc = candles.map(c => ({
+    time:  Math.floor(new Date(c.ts).getTime() / 1000),
+    open:  c.open,
+    high:  c.high,
+    low:   c.low,
+    close: c.close,
+  }));
+  const vol = candles.map(c => ({
+    time:  Math.floor(new Date(c.ts).getTime() / 1000),
+    value: c.volume,
+    color: c.close >= c.open ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)',
+  }));
+
+  _candlesSeries.setData(ohlc);
+  _candlesVolSeries.setData(vol);
+  _candlesChart.timeScale().fitContent();
+
+  // Keep chart width in sync with container
+  _candlesResizeObs = new ResizeObserver(entries => {
+    if (_candlesChart) {
+      _candlesChart.applyOptions({ width: entries[0].contentRect.width });
+    }
+  });
+  _candlesResizeObs.observe(container);
+}
+
+function _renderCandleStats(c) {
+  const el = document.getElementById('candles-stats');
+  if (!el || !c) return;
+  const change    = c.close - c.open;
+  const changePct = ((change / c.open) * 100).toFixed(2);
+  const isPos     = change >= 0;
+  const pnlCls    = isPos ? 'text-green-400' : 'text-red-400';
+  const sign      = isPos ? '+' : '';
+  el.innerHTML = [
+    ['Open',   `$${fmt(c.open)}`],
+    ['High',   `$${fmt(c.high)}`],
+    ['Low',    `$${fmt(c.low)}`],
+    ['Close',  `$${fmt(c.close)}`],
+    ['Volume', c.volume ? Number(c.volume).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '\u2014'],
+    ['Change', `<span class="${pnlCls}">${sign}$${fmt(change)} (${sign}${changePct}%)</span>`],
+  ].map(([label, val]) =>
+    `<div class="rounded-lg bg-white/5 px-3 py-2 border border-white/10">
+       <div class="text-xs text-gray-500">${label}</div>
+       <div class="text-sm font-mono font-semibold text-white mt-0.5">${val}</div>
+     </div>`
+  ).join('');
+}
+
 
 // ─────────────────────────────────────────────
 // Init

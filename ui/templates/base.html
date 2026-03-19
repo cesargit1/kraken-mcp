@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>xStocks Bot Dashboard</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="/static/style.css?v=2" />
+  <link rel="stylesheet" href="/static/style.css?v=3" />
 </head>
 <body class="h-full">
 
@@ -35,12 +35,14 @@
 
     <main class="p-4 lg:p-6">
       {% include "tabs/positions.html" %}
+      {% include "tabs/candles.html" %}
       {% include "tabs/watchlist.html" %}
       {% include "tabs/agent.html" %}
       {% include "tabs/settings.html" %}
     </main>
   </div>
 
-<script src="/static/app.js?v=2"></script>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
+<script src="/static/app.js?v=3"></script>
 </body>
 </html>
