@@ -1,5 +1,5 @@
 -- ============================================================
--- Trading Bot — Supabase Schema
+-- Trading Bot — Supabase Schema (Paper Trading)
 -- Run this in the Supabase SQL editor to set up all tables.
 -- ============================================================
 
@@ -8,11 +8,9 @@
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS watchlist (
     id          SERIAL PRIMARY KEY,
-    ticker      TEXT NOT NULL UNIQUE,          -- e.g. 'NVDAx', 'XXBTZUSD'
-    source      TEXT NOT NULL DEFAULT 'kraken_xstock',  -- 'kraken_xstock' | 'kraken_crypto' | 'yahoo'
-    pair        TEXT,                          -- Kraken pair format: 'NVDAx/USD', 'XXBTZUSD'
-    asset_class TEXT DEFAULT 'spot',           -- for --asset-class flag ('spot' | 'tokenized_asset')
-    search_name TEXT,                          -- human-readable name for X search (e.g. 'NVDA', 'Bitcoin BTC')
+    ticker      TEXT NOT NULL UNIQUE,          -- e.g. 'NVDA', 'AAPL', 'BTC-USD'
+    asset_class TEXT DEFAULT 'stock',          -- 'stock' | 'crypto'
+    search_name TEXT,                          -- human-readable name for X search (e.g. 'NVIDIA NVDA')
     active      BOOLEAN DEFAULT true,
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
@@ -64,34 +62,23 @@ CREATE INDEX IF NOT EXISTS indicators_lookup ON indicators (ticker, timeframe, t
 
 -- ------------------------------------------------------------
 -- signal_state: last known AI output per ticker (dedup / 60-min timer)
+-- Also tracks per-flag cooldown (replaces the separate cooldown table).
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS signal_state (
     ticker          TEXT PRIMARY KEY,
     last_signal     JSONB,
     last_event_type TEXT,
     last_ai_run     TIMESTAMPTZ,
+    cooldown_until  TIMESTAMPTZ,              -- suppress re-trigger until this time
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ------------------------------------------------------------
--- cooldown: event-type cooldown log per ticker
--- ------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS cooldown (
-    id           BIGSERIAL PRIMARY KEY,
-    ticker       TEXT NOT NULL,
-    event_type   TEXT NOT NULL,
-    triggered_at TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS cooldown_lookup ON cooldown (ticker, event_type, triggered_at DESC);
-
--- ------------------------------------------------------------
--- agent_log: one row per AI decision session (reasoning only — no financials)
--- Financial details live in transaction_ledger, linked via agent_log_id.
+-- agent_log: one row per AI decision session
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_log (
     id                   BIGSERIAL PRIMARY KEY,
     ticker               TEXT NOT NULL,
-    pair                 TEXT,                         -- Kraken pair format: 'NVDAx/USD'
     ts                   TIMESTAMPTZ DEFAULT NOW(),
     action               TEXT NOT NULL,   -- 'buy' | 'sell' | 'short' | 'cover' | 'hold'
     trigger_flags        TEXT,            -- comma-separated flags that triggered this run
@@ -99,7 +86,7 @@ CREATE TABLE IF NOT EXISTS agent_log (
     social_analysis      JSONB,
     risk_analysis        JSONB,
     decision_reasoning   TEXT,
-    decision_json        JSONB,            -- full decision agent response {action, size_usd, leverage, stop_loss, confidence, specialist_agreement, reasoning, key_contradictions}
+    decision_json        JSONB,            -- full decision agent response
     position_side        TEXT,           -- 'long' | 'short' | 'flat' (at time of run)
     indicators_snapshot  JSONB,           -- {timeframe: {rsi, macd, bb_*, ema_*, obv, atr, vwap, flags}} at time of run
     executed             BOOLEAN DEFAULT false  -- true if at least one transaction was recorded
@@ -113,7 +100,7 @@ CREATE INDEX IF NOT EXISTS agent_log_lookup ON agent_log (ticker, ts DESC);
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS positions (
     id              BIGSERIAL PRIMARY KEY,
-    ticker          TEXT NOT NULL,                -- multiple closed rows allowed; partial index enforces one open row per ticker
+    ticker          TEXT NOT NULL,
     side            TEXT NOT NULL,                -- 'long' | 'short'
     quantity        FLOAT NOT NULL,               -- number of units held
     entry_price     FLOAT NOT NULL,
@@ -125,149 +112,71 @@ CREATE TABLE IF NOT EXISTS positions (
     -- filled in when closed (NULL = still open)
     closed_at       TIMESTAMPTZ,
     close_price     FLOAT,
-    realized_pnl    FLOAT,                        -- matches transaction_ledger.realized_pnl
+    realized_pnl    FLOAT,
     close_reason    TEXT,                         -- 'stop_loss' | 'ai_signal' | 'manual'
     total_fees      FLOAT,                        -- entry + exit trading fees
     margin_cost     FLOAT                         -- accrued interest on borrowed capital
 );
-
--- Migration: rename positions columns to match transaction_ledger terminology
--- Run once in Supabase SQL editor if upgrading an existing database:
--- ALTER TABLE positions RENAME COLUMN volume TO quantity;
--- ALTER TABLE positions RENAME COLUMN pnl TO realized_pnl;
--- ALTER TABLE positions ADD COLUMN IF NOT EXISTS high_water_price FLOAT;
--- ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS trailing_stop_atr_mult FLOAT DEFAULT 2.0;
--- ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS poll_interval_sec INTEGER DEFAULT 300;
--- ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS ai_timer_min INTEGER DEFAULT 60;
--- ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS cooldown_min INTEGER DEFAULT 30;
--- ALTER TABLE positions ADD COLUMN IF NOT EXISTS total_fees FLOAT;
--- ALTER TABLE positions ADD COLUMN IF NOT EXISTS margin_cost FLOAT;
--- Enforces at most one open position per ticker while allowing many closed rows.
 CREATE UNIQUE INDEX IF NOT EXISTS positions_open ON positions (ticker) WHERE closed_at IS NULL;
 
--- Migration: if upgrading an existing database that still has the column-level UNIQUE key:
--- ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_ticker_key;
--- The UNIQUE INDEX above will be created fresh on the next schema run.
-
 -- ------------------------------------------------------------
--- Seed default watchlist (xStocks + crypto on Kraken)
+-- Seed default watchlist (Yahoo Finance tickers)
 -- ------------------------------------------------------------
-INSERT INTO watchlist (ticker, source, pair, asset_class, search_name) VALUES
-    ('AAPLx', 'kraken_xstock', 'AAPLx/USD', 'tokenized_asset', 'AAPL'),
-    ('NVDAx', 'kraken_xstock', 'NVDAx/USD', 'tokenized_asset', 'NVDA'),
-    ('TSLAx', 'kraken_xstock', 'TSLAx/USD', 'tokenized_asset', 'TSLA'),
-    ('SPYx',  'kraken_xstock', 'SPYx/USD',  'tokenized_asset', 'SPY'),
-    ('QQQx',  'kraken_xstock', 'QQQx/USD',  'tokenized_asset', 'QQQ'),
-    ('XXBTZUSD', 'kraken_crypto', 'XXBTZUSD', 'spot', 'Bitcoin BTC'),
-    ('XETHZUSD', 'kraken_crypto', 'XETHZUSD', 'spot', 'Ethereum ETH')
+INSERT INTO watchlist (ticker, asset_class, search_name) VALUES
+    ('AAPL',    'stock',  'Apple AAPL'),
+    ('NVDA',    'stock',  'NVIDIA NVDA'),
+    ('TSLA',    'stock',  'Tesla TSLA'),
+    ('SPY',     'stock',  'S&P 500 SPY'),
+    ('QQQ',     'stock',  'Nasdaq QQQ'),
+    ('BTC-USD', 'crypto', 'Bitcoin BTC'),
+    ('ETH-USD', 'crypto', 'Ethereum ETH')
 ON CONFLICT (ticker) DO NOTHING;
 
--- Migration: add search_name column to existing watchlist table
--- ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS search_name TEXT;
--- UPDATE watchlist SET search_name = 'AAPL' WHERE ticker = 'AAPLx';
--- UPDATE watchlist SET search_name = 'NVDA' WHERE ticker = 'NVDAx';
--- UPDATE watchlist SET search_name = 'TSLA' WHERE ticker = 'TSLAx';
--- UPDATE watchlist SET search_name = 'SPY'  WHERE ticker = 'SPYx';
--- UPDATE watchlist SET search_name = 'QQQ'  WHERE ticker = 'QQQx';
-
 -- ------------------------------------------------------------
--- transaction_ledger: canonical record of every exchange event
+-- trades: simplified paper trade log (replaces transaction_ledger)
+-- One row per executed trade leg (entry or exit).
 -- ------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS transaction_ledger (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-  -- identity
-  exchange                TEXT NOT NULL DEFAULT 'kraken',
-  transaction_type        TEXT NOT NULL,          -- trade, deposit, withdrawal, transfer, reward, earn, pnl, adjustment
-  transaction_subtype     TEXT,                   -- buy, sell, wallet_transfer, futures_transfer, allocate, deallocate
-  source_type             TEXT NOT NULL,          -- spot, futures, funding, earn, paper
-
-  external_id             TEXT NOT NULL,          -- primary exchange id for this transaction
-  external_parent_id      TEXT,                   -- parent/group/order id
-  order_id                TEXT,
-  trade_id                TEXT,
-  refid                   TEXT,
-  client_order_id         TEXT,
-  userref                 TEXT,
-
-  -- state
-  status                  TEXT NOT NULL,          -- pending, open, closed, completed, canceled, failed, expired
-  side                    TEXT,                   -- buy, sell
-  direction               TEXT,                   -- in, out
-  is_simulated            BOOLEAN NOT NULL DEFAULT FALSE,
-  is_margin               BOOLEAN NOT NULL DEFAULT FALSE,
-  is_reduce_only          BOOLEAN NOT NULL DEFAULT FALSE,
-  is_internal_transfer    BOOLEAN NOT NULL DEFAULT FALSE,
-
-  -- timestamps
-  event_time              TIMESTAMPTZ NOT NULL,
-  created_at_exchange     TIMESTAMPTZ,
-  updated_at_exchange     TIMESTAMPTZ,
-  settled_at              TIMESTAMPTZ,
-
-  -- asset / market
-  asset                   TEXT,                   -- main asset for non-trade rows
-  base_asset              TEXT,                   -- trade base asset
-  quote_asset             TEXT,                   -- trade quote asset
-  pair_symbol             TEXT,                   -- BTCUSD / BTC/USD
-  instrument_symbol       TEXT,                   -- futures symbol
-  asset_class             TEXT,
-  method                  TEXT,                   -- deposit/withdrawal method
-  network                 TEXT,
-  address                 TEXT,
-  address_tag             TEXT,
-  key_name                TEXT,
-  tx_hash                 TEXT,
-
-  -- transaction economics
-  quantity                NUMERIC(36,18),         -- amount of asset or base quantity
-  price                   NUMERIC(36,18),         -- unit price
-  gross_amount            NUMERIC(36,18),         -- before fees
-  gross_currency          TEXT,                   -- usually quote currency or asset currency
-  fee_amount              NUMERIC(36,18),
-  fee_asset               TEXT,
-  net_amount              NUMERIC(36,18),         -- after fees
-  net_currency            TEXT,
-  cost                    NUMERIC(36,18),         -- quote spent/received for trades
-  cost_currency           TEXT,
-  balance_after           NUMERIC(36,18),
-
-  -- optional trade/futures specifics
-  leverage                TEXT,
-  order_type              TEXT,
-  time_in_force           TEXT,
-  trigger_price           NUMERIC(36,18),
-  realized_pnl            NUMERIC(36,18),
-  unrealized_pnl          NUMERIC(36,18),
-  pnl_currency            TEXT,
-  funding_rate            NUMERIC(24,12),
-  funding_amount          NUMERIC(36,18),
-
-  -- earn / staking
-  strategy_id             TEXT,
-  converted_amount        NUMERIC(36,18),
-  converted_asset         TEXT,
-
-  -- ui / notes
-  title                   TEXT,
-  notes                   TEXT,
-  tags                    JSONB,
-  reconciliation_status   TEXT,
-
-  -- link back to the AI session that triggered this transaction (NULL for manual/external)
-  agent_log_id            BIGINT REFERENCES agent_log(id),
-
-  -- audit
-  raw_payload             JSONB NOT NULL,
-  source_command          TEXT,
-  inserted_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
-  last_synced_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-  CONSTRAINT uq_transaction_ledger_exchange_external UNIQUE (exchange, external_id)
+CREATE TABLE IF NOT EXISTS trades (
+    id              BIGSERIAL PRIMARY KEY,
+    agent_log_id    BIGINT REFERENCES agent_log(id),
+    ticker          TEXT NOT NULL,
+    side            TEXT NOT NULL,                -- 'buy' | 'sell'
+    action          TEXT NOT NULL,                -- 'buy' | 'sell' | 'short' | 'cover'
+    quantity        FLOAT,
+    price           FLOAT,                        -- execution price
+    cost            FLOAT,                        -- notional USD (quantity * price)
+    fee_amount      FLOAT,                        -- trading fee
+    leverage        INTEGER DEFAULT 1,
+    realized_pnl    FLOAT,                        -- P&L on exit trades
+    status          TEXT NOT NULL DEFAULT 'completed',  -- 'completed' | 'failed'
+    event_time      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    inserted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS tl_event_time   ON transaction_ledger (event_time DESC);
-CREATE INDEX IF NOT EXISTS tl_type         ON transaction_ledger (transaction_type, source_type);
-CREATE INDEX IF NOT EXISTS tl_asset        ON transaction_ledger (asset, base_asset);
-CREATE INDEX IF NOT EXISTS tl_pair         ON transaction_ledger (pair_symbol);
-CREATE INDEX IF NOT EXISTS tl_order        ON transaction_ledger (order_id) WHERE order_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS tl_refid        ON transaction_ledger (refid)    WHERE refid    IS NOT NULL;
+CREATE INDEX IF NOT EXISTS trades_event_time ON trades (event_time DESC);
+CREATE INDEX IF NOT EXISTS trades_ticker     ON trades (ticker, event_time DESC);
+
+-- ------------------------------------------------------------
+-- bot_settings: single-row configuration table
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS bot_settings (
+    id                     INTEGER PRIMARY KEY DEFAULT 1,
+    paper_capital          FLOAT NOT NULL DEFAULT 1000,
+    max_position_pct       FLOAT NOT NULL DEFAULT 20,
+    max_position_usd       FLOAT,
+    max_leverage           INTEGER NOT NULL DEFAULT 3,
+    max_open_positions     INTEGER NOT NULL DEFAULT 10,
+    risk_per_trade_pct     FLOAT NOT NULL DEFAULT 2,
+    stop_loss_pct_default  FLOAT NOT NULL DEFAULT 2.5,
+    trailing_stop_atr_mult FLOAT NOT NULL DEFAULT 2.0,
+    poll_interval_sec      INTEGER NOT NULL DEFAULT 300,
+    ai_timer_min           INTEGER NOT NULL DEFAULT 60,
+    cooldown_min           INTEGER NOT NULL DEFAULT 30,
+    ai_provider            TEXT    NOT NULL DEFAULT 'grok',
+    ai_model               TEXT    NOT NULL DEFAULT 'grok-4-1-fast-reasoning',
+    updated_at             TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT single_row CHECK (id = 1)
+);
+-- Add columns for existing deployments (safe no-op if they already exist):
+ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS ai_provider TEXT NOT NULL DEFAULT 'grok';
+ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS ai_model    TEXT NOT NULL DEFAULT 'grok-4-1-fast-reasoning';
+INSERT INTO bot_settings (id) VALUES (1) ON CONFLICT DO NOTHING;

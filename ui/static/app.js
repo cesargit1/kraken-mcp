@@ -52,7 +52,7 @@ function switchTab(name, clickedEl) {
   if (name === 'positions') loadPositions();
   if (name === 'watchlist') loadWatchlist();
   if (name === 'settings')  loadSettings();
-  if (name === 'agent')     loadHistory();
+  if (name === 'agent')     { loadHistory(); refreshActiveRuns(); }
   if (name === 'candles')   loadCandles();
 }
 
@@ -129,19 +129,18 @@ async function loadPositions() {
         <table class="w-full whitespace-nowrap text-left">
           <thead class="border-b border-white/10 text-sm/6 text-white">
             <tr>
-              <th class="py-2 pl-4 pr-8 font-semibold sm:pl-6 lg:pl-8">Ticker</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Side</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Volume</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Entry</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Size</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Cost</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Stop-Loss</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Current</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">P&amp;L</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Leverage</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Margin Cost</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Reasoning</th>
-              <th class="py-2 pl-0 pr-4 font-semibold text-right sm:pr-6 lg:pr-8">Opened</th>
+              <th class="py-2 pl-4 pr-8 font-semibold sm:pl-6 lg:pl-8">ticker</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">side</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">quantity</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">entry_price</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">notional</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">margin</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">stop_loss</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">price</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">unrealized_pnl</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">leverage</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">margin_cost</th>
+              <th class="py-2 pl-0 pr-4 font-semibold text-right sm:pr-6 lg:pr-8">opened_at</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-white/5">
@@ -152,7 +151,8 @@ async function loadPositions() {
               ? (((p.stop_loss - p.entry_price) / p.entry_price) * 100).toFixed(1) : null;
             const slLabel = p.stop_loss
               ? `$${fmt(p.stop_loss)}<br><span class="text-xs text-gray-500">${slPct}%</span>` : '—';
-            return `<tr>
+            const posId = p.ticker.replace(/[^a-z0-9]/gi, '_');
+            return `<tr data-pos-id="${posId}">
               <td class="py-4 pl-4 pr-8 sm:pl-6 lg:pl-8"><div class="truncate text-sm/6 font-medium text-white">${esc(p.ticker)}</div></td>
               <td class="py-4 pl-0 pr-8 text-sm/6"><span class="${pillClass(p.action)}">${esc(p.action)}</span></td>
               <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-gray-400">${p.volume ?? '—'}</td>
@@ -160,19 +160,19 @@ async function loadPositions() {
               <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-white">${sizeUsd != null ? '$' + fmt(sizeUsd) : '—'}</td>
               <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-gray-400">${costUsd != null ? '$' + fmt(costUsd) : '—'}</td>
               <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-red-400">${slLabel}</td>
-              <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-white">${p.current_price ? '$' + fmt(p.current_price) : '—'}</td>
-              <td class="py-4 pl-0 pr-8 text-sm/6 pnl ${p.pnl == null ? '' : p.pnl >= 0 ? 'pos' : 'neg'}">
+              <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-white" id="pos-price-${posId}">${p.current_price ? '$' + fmt(p.current_price) : '—'}</td>
+              <td class="py-4 pl-0 pr-8 text-sm/6 pnl ${p.pnl == null ? '' : p.pnl >= 0 ? 'pos' : 'neg'}" id="pos-pnl-${posId}">
                 ${(() => {
                   if (p.pnl == null) return '—';
-                  const cost = (p.entry_price || 0) * (p.volume || 0);
-                  const pct  = cost > 0 ? ((p.pnl / cost) * 100).toFixed(2) : null;
-                  const sign = p.pnl >= 0 ? '+' : '';
+                  const notional = (p.entry_price || 0) * (p.volume || 0);
+                  const margin   = notional / Math.max(p.leverage || 1, 1);
+                  const pct      = margin > 0 ? ((p.pnl / margin) * 100).toFixed(2) : null;
+                  const sign     = p.pnl >= 0 ? '+' : '';
                   return `${sign}$${fmt(p.pnl)}${pct != null ? `<br><span class="text-xs">${sign}${pct}%</span>` : ''}`;
                 })()}
               </td>
               <td class="py-4 pl-0 pr-8 text-sm/6 text-gray-400">${p.leverage ?? 1}x</td>
-              <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-orange-400">${p.margin_cost > 0 ? '-$' + fmt(p.margin_cost) : '—'}</td>
-              <td class="py-4 pl-0 pr-8 text-sm/6 text-gray-500" style="min-width:280px;max-width:360px;white-space:normal;line-height:1.4">${esc(p.reasoning?.slice(0,160) || '—')}</td>
+              <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-orange-400" id="pos-mc-${posId}">${p.margin_cost > 0 ? '-$' + fmt(p.margin_cost) : '—'}</td>
               <td class="py-4 pl-0 pr-4 text-right text-sm/6 text-gray-400 sm:pr-6 lg:pr-8">${fmtDate(p.opened_at)}</td>
             </tr>`;
           }).join('')}
@@ -190,18 +190,18 @@ async function loadPositions() {
         <table class="w-full whitespace-nowrap text-left">
           <thead class="border-b border-white/10 text-sm/6 text-white">
             <tr>
-              <th class="py-2 pl-4 pr-8 font-semibold sm:pl-6 lg:pl-8">Ticker</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Side</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Volume</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Entry</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Exit</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Size</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">P&amp;L</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Fees</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Margin Cost</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Reason</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Opened</th>
-              <th class="py-2 pl-0 pr-4 font-semibold text-right sm:pr-6 lg:pr-8">Closed</th>
+              <th class="py-2 pl-4 pr-8 font-semibold sm:pl-6 lg:pl-8">ticker</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">side</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">quantity</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">entry_price</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">close_price</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">notional</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">realized_pnl</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">fee</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">margin_cost</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">close_reason</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">opened_at</th>
+              <th class="py-2 pl-0 pr-4 font-semibold text-right sm:pr-6 lg:pr-8">closed_at</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-white/5">
@@ -232,7 +232,7 @@ async function loadPositions() {
         </table>`;
     }
 
-    // Recent trades from transaction_ledger
+    // Recent trades
     const trades = data.recent_trades || [];
     const rtBody = document.getElementById('recent-trades-body');
     if (!trades.length) {
@@ -242,35 +242,36 @@ async function loadPositions() {
         <table class="w-full whitespace-nowrap text-left">
           <thead class="border-b border-white/10 text-sm/6 text-white">
             <tr>
-              <th class="py-2 pl-4 pr-8 font-semibold sm:pl-6 lg:pl-8">#</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Ticker</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Action</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Qty</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Price</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Size</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Leverage</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Fee</th>
-              <th class="py-2 pl-0 pr-8 font-semibold">Status</th>
-              <th class="py-2 pl-0 pr-4 font-semibold text-right sm:pr-6 lg:pr-8">When</th>
+              <th class="py-2 pl-4 pr-8 font-semibold sm:pl-6 lg:pl-8">id</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">ticker</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">action</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">quantity</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">price</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">notional</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">leverage</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">fee</th>
+              <th class="py-2 pl-0 pr-8 font-semibold">status</th>
+              <th class="py-2 pl-0 pr-4 font-semibold text-right sm:pr-6 lg:pr-8">event_time</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-white/5">
           ${trades.map(t => {
             const price = parseFloat(t.price) || 0;
             const qty   = parseFloat(t.quantity) || 0;
-            const gross = parseFloat(t.gross_amount) || (price * qty);
+            const cost  = parseFloat(t.cost) || (price * qty);
             const fee   = parseFloat(t.fee_amount) || 0;
             const lev   = parseInt(t.leverage) || 1;
+            const pnl   = t.realized_pnl != null ? parseFloat(t.realized_pnl) : null;
             const statusCls = t.status === 'completed'
               ? 'text-green-400' : t.status === 'failed' ? 'text-red-400' : 'text-gray-500';
             const statusLabel = t.status === 'completed' ? '✓' : t.status === 'failed' ? '✗' : '—';
             return `<tr>
               <td class="py-4 pl-4 pr-8 text-sm/6 text-gray-500 sm:pl-6 lg:pl-8">#${t.id}</td>
-              <td class="py-4 pl-0 pr-8"><div class="truncate text-sm/6 font-medium text-white">${esc(t.base_asset)}</div></td>
-              <td class="py-4 pl-0 pr-8 text-sm/6"><span class="${pillClass(t.transaction_subtype)}">${esc(t.transaction_subtype || t.side)}</span></td>
+              <td class="py-4 pl-0 pr-8"><div class="truncate text-sm/6 font-medium text-white">${esc(t.ticker)}</div></td>
+              <td class="py-4 pl-0 pr-8 text-sm/6"><span class="${pillClass(t.action)}">${esc(t.action)}</span></td>
               <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-gray-400">${qty ? qty.toFixed(4) : '—'}</td>
               <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-gray-400">$${fmt(price)}</td>
-              <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-white">$${fmt(gross)}</td>
+              <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-white">$${fmt(cost)}</td>
               <td class="py-4 pl-0 pr-8 text-sm/6 text-gray-400">${lev}x</td>
               <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-gray-500">${fee ? '$' + fmt(fee) : '—'}</td>
               <td class="py-4 pl-0 pr-8 text-sm/6 ${statusCls}">${statusLabel}</td>
@@ -286,6 +287,165 @@ async function loadPositions() {
     console.error(e);
   }
 }
+
+async function refreshPositionPrices(btn) {
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.textContent = '⟳ Refreshing…'; btn.disabled = true; }
+  try {
+    const res  = await fetch('/api/positions/prices', { cache: 'no-store' });
+    const data = await res.json();
+
+    for (const r of (data.positions || [])) {
+      const posId = r.ticker.replace(/[^a-z0-9]/gi, '_');
+
+      const priceEl = document.getElementById(`pos-price-${posId}`);
+      if (priceEl) priceEl.textContent = r.current_price ? '$' + fmt(r.current_price) : '—';
+
+      const mcEl = document.getElementById(`pos-mc-${posId}`);
+      if (mcEl) mcEl.textContent = r.margin_cost > 0 ? '-$' + fmt(r.margin_cost) : '—';
+
+      const pnlEl = document.getElementById(`pos-pnl-${posId}`);
+      if (pnlEl) {
+        if (r.pnl == null) {
+          pnlEl.textContent = '—';
+          pnlEl.className = 'py-4 pl-0 pr-8 text-sm/6 pnl';
+        } else {
+          // Need entry_price, volume, leverage from the row — read from sibling cells in the DOM
+          const row = pnlEl.closest('tr');
+          const cells = row ? row.querySelectorAll('td') : [];
+          // cells: 0=ticker,1=side,2=qty,3=entry,4=notional,5=margin,6=stop,7=price,8=pnl,9=leverage
+          const entryText  = cells[3]?.textContent?.replace(/[$,]/g,'') || '0';
+          const qtyText    = cells[2]?.textContent?.replace(/,/g,'') || '0';
+          const leverageText = cells[9]?.textContent?.replace('x','') || '1';
+          const notional   = parseFloat(entryText) * parseFloat(qtyText);
+          const margin     = notional / Math.max(parseFloat(leverageText) || 1, 1);
+          const pct        = margin > 0 ? ((r.pnl / margin) * 100).toFixed(2) : null;
+          const sign       = r.pnl >= 0 ? '+' : '';
+          pnlEl.innerHTML  = `${sign}$${fmt(r.pnl)}${pct != null ? `<br><span class="text-xs">${sign}${pct}%</span>` : ''}`;
+          pnlEl.className  = 'py-4 pl-0 pr-8 text-sm/6 pnl ' + (r.pnl >= 0 ? 'pos' : 'neg');
+        }
+      }
+    }
+
+    // Update summary tiles
+    const s = data.summary || {};
+    if (s.total_pnl != null) {
+      const pnlEl = document.getElementById('total-pnl');
+      if (pnlEl) {
+        pnlEl.textContent = (s.total_pnl >= 0 ? '+' : '') + '$' + fmt(s.total_pnl);
+        pnlEl.className = 'text-2xl font-semibold tracking-tight pnl ' + (s.total_pnl >= 0 ? 'pos' : 'neg');
+      }
+      const pctEl = document.getElementById('total-pnl-pct');
+      if (pctEl && s.pnl_pct != null) {
+        pctEl.textContent = (s.pnl_pct >= 0 ? '+' : '') + s.pnl_pct + '% on margin';
+        pctEl.className = 'text-xs pnl ' + (s.total_pnl >= 0 ? 'pos' : 'neg');
+      }
+    }
+    if (s.total_margin_cost != null) {
+      const mcEl = document.getElementById('total-margin-cost');
+      if (mcEl) mcEl.textContent = s.total_margin_cost > 0 ? '-$' + fmt(s.total_margin_cost) : '$0';
+    }
+
+    document.getElementById('positions-updated').textContent = 'Prices updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    console.error(e);
+  } finally {
+    if (btn) { btn.textContent = orig; btn.disabled = false; }
+  }
+}
+
+// ─────────────────────────────────────────────
+// Active Runs summary (above history)
+// ─────────────────────────────────────────────
+const _uiRuns = {};           // { lid: { ticker, stage, status } }
+let _activeRunsTimer = null;
+
+const STAGE_LABELS = {
+  candles: 'Fetching candles',
+  indicators: 'Computing indicators',
+  price_check: 'Checking price',
+  stop_loss: 'Stop-loss check',
+  flag_check: 'Evaluating flags',
+  ai_pipeline: 'Running AI pipeline',
+  context_fetch: 'Fetching context',
+  specialists: 'Running specialists',
+  x_search: 'Fetching X posts',
+  technical: 'Technical analyst',
+  social: 'Social analyst',
+  risk: 'Risk analyst',
+  decision: 'Decision agent',
+  trade: 'Executing trade',
+  execution: 'Executing trade',
+  complete: 'Complete',
+  skipped: 'Skipped',
+  no_data: 'No data',
+  starting: 'Starting\u2026',
+};
+
+function _stageLabel(stage) {
+  return STAGE_LABELS[stage] || stage || '—';
+}
+
+function _renderActiveRuns(botTickers, uiRuns) {
+  const el = document.getElementById('active-runs-body');
+  if (!el) return;
+
+  // Merge bot-loop running tickers and UI-triggered runs
+  const lines = [];
+
+  // Bot-loop tickers that are actually running
+  (botTickers || []).forEach(t => {
+    if (t.status === 'running') {
+      lines.push({ ticker: t.ticker, stage: t.stage, source: 'bot' });
+    }
+  });
+
+  // UI-triggered runs
+  Object.values(uiRuns).forEach(r => {
+    if (r.status === 'running') {
+      lines.push({ ticker: r.ticker, stage: r.stage, source: 'ui' });
+    }
+  });
+
+  if (!lines.length) {
+    el.innerHTML = '<p class="text-sm text-gray-500">No agents running</p>';
+    return;
+  }
+
+  el.innerHTML = '<ul class="space-y-2">' + lines.map(l => {
+    const badge = l.source === 'ui'
+      ? '<span class="ml-2 text-[10px] font-medium text-indigo-400 bg-indigo-400/10 rounded px-1.5 py-0.5 ring-1 ring-inset ring-indigo-400/20">manual</span>'
+      : '<span class="ml-2 text-[10px] font-medium text-cyan-400 bg-cyan-400/10 rounded px-1.5 py-0.5 ring-1 ring-inset ring-cyan-400/20">bot</span>';
+    return `<li class="flex items-center gap-3 text-sm">
+      <span class="spinner"></span>
+      <strong class="font-mono text-white">${esc(l.ticker)}</strong>
+      <span class="text-gray-400">${esc(_stageLabel(l.stage))}</span>
+      ${badge}
+    </li>`;
+  }).join('') + '</ul>';
+}
+
+async function refreshActiveRuns() {
+  try {
+    const res = await fetch('/api/bot-status');
+    const json = await res.json();
+    _renderActiveRuns(json.tickers || [], _uiRuns);
+  } catch(_) {
+    _renderActiveRuns([], _uiRuns);
+  }
+}
+
+function _startActiveRunsPolling() {
+  if (_activeRunsTimer) return;
+  _activeRunsTimer = setInterval(refreshActiveRuns, 3000);
+}
+
+function _stopActiveRunsPolling() {
+  if (_activeRunsTimer) { clearInterval(_activeRunsTimer); _activeRunsTimer = null; }
+}
+
+// Start polling when the page loads
+_startActiveRunsPolling();
 
 // ─────────────────────────────────────────────
 // Run History table
@@ -666,49 +826,33 @@ function _renderTradeDetail(t) {
     ${_renderDecision(t)}
     `;
 
-  // ── transaction_ledger section ────────────────────────────────────────────
+  // ── trades section ────────────────────────────────────────────────────────
   const txns = t.transactions || [];
   let txSectionBody;
   if (!txns.length) {
-    txSectionBody = `<div class="text-xs py-2 px-3" style="color:var(--muted)">No transactions recorded for this agent run.</div>`;
+    txSectionBody = `<div class="text-xs py-2 px-3" style="color:var(--muted)">No trades recorded for this agent run.</div>`;
   } else {
     txSectionBody = txns.map((tx, i) => {
       const cols = [
-        ['id',                tx.id   ? `<span style="font-family:var(--font-mono);font-size:10px;color:var(--muted)">${esc(tx.id)}</span>` : null],
+        ['id',                tx.id   ? `<span style="font-family:var(--font-mono);font-size:10px;color:var(--muted)">${esc(String(tx.id))}</span>` : null],
         ['event_time',        tx.event_time ? `<span style="font-family:var(--font-mono)">${esc(tx.event_time)}</span>` : null],
         ['status',            tx.status     ? esc(tx.status) : null],
         ['side',              tx.side       ? `<span class="${pillClass(tx.side)}">${esc(tx.side)}</span>` : null],
-        ['source_type',       tx.source_type  ? esc(tx.source_type) : null],
-        ['transaction_type',  tx.transaction_type    ? esc(tx.transaction_type)    : null],
-        ['transaction_subtype', tx.transaction_subtype ? esc(tx.transaction_subtype) : null],
-        ['is_simulated',      tx.is_simulated != null ? renderVal(tx.is_simulated) : null],
-        ['is_margin',         tx.is_margin    != null ? renderVal(tx.is_margin)    : null],
-        ['pair_symbol',       tx.pair_symbol  ? esc(tx.pair_symbol) : null],
-        ['base_asset',        tx.base_asset   ? esc(tx.base_asset)  : null],
-        ['quote_asset',       tx.quote_asset  ? esc(tx.quote_asset) : null],
+        ['action',            tx.action     ? esc(tx.action) : null],
+        ['ticker',            tx.ticker     ? esc(tx.ticker) : null],
         ['quantity',          tx.quantity  != null ? `<span style="font-family:var(--font-mono)">${tx.quantity}</span>`  : null],
         ['price',             tx.price     != null ? `<span style="font-family:var(--font-mono)">$${fmt(tx.price)}</span>` : null],
-        ['gross_amount',      tx.gross_amount != null ? `<span style="font-family:var(--font-mono)">$${fmt(tx.gross_amount)} ${esc(tx.gross_currency||'')}</span>` : null],
-        ['fee_amount',        tx.fee_amount   != null ? `<span style="font-family:var(--font-mono)">$${fmt(tx.fee_amount)} ${esc(tx.fee_asset||'')}</span>` : null],
-        ['net_amount',        tx.net_amount   != null ? `<span style="font-family:var(--font-mono)">$${fmt(tx.net_amount)} ${esc(tx.net_currency||'')}</span>` : null],
-        ['cost',              tx.cost         != null ? `<span style="font-family:var(--font-mono)">$${fmt(tx.cost)} ${esc(tx.cost_currency||'')}</span>` : null],
-        ['leverage',          tx.leverage     ? esc(tx.leverage) + 'x' : null],
-        ['order_type',        tx.order_type   ? esc(tx.order_type)  : null],
-        ['external_id',       tx.external_id  ? `<span style="font-family:var(--font-mono);font-size:10px;color:var(--muted)">${esc(tx.external_id)}</span>` : null],
-        ['order_id',          tx.order_id     ? `<span style="font-family:var(--font-mono);font-size:10px;color:var(--muted)">${esc(tx.order_id)}</span>` : null],
-        ['source_command',    tx.source_command ? `<span style="color:var(--muted)">${esc(tx.source_command)}</span>` : null],
+        ['cost',              tx.cost      != null ? `<span style="font-family:var(--font-mono)">$${fmt(tx.cost)}</span>` : null],
+        ['fee_amount',        tx.fee_amount != null ? `<span style="font-family:var(--font-mono)">$${fmt(tx.fee_amount)}</span>` : null],
+        ['leverage',          tx.leverage   ? esc(String(tx.leverage)) + 'x' : null],
       ].filter(([, v]) => v !== null);
 
-      const simBadge = tx.is_simulated
-        ? `<span class="inline-flex items-center rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset bg-yellow-400/10 text-yellow-400 ring-yellow-400/20">paper sim</span>`
-        : `<span class="inline-flex items-center rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset bg-indigo-400/10 text-indigo-400 ring-indigo-400/20">live</span>`;
       const sidePill = tx.side ? `<span class="${pillClass(tx.side)}">${esc(tx.side)}</span>` : '';
       const priceStr = tx.price != null ? `<span class="font-mono" style="color:var(--muted)">$${fmt(tx.price)}</span>` : '';
       return `
         <details class="bg-white/[0.03] border border-white/10 rounded-lg mb-2">
           <summary class="py-1.5 min-h-0 text-xs font-mono flex items-center gap-2 px-3 cursor-pointer" style="color:var(--muted)">
-            transaction ${i + 1} of ${txns.length}
-            ${simBadge}
+            trade ${i + 1} of ${txns.length}
             ${sidePill}
             ${priceStr}
           </summary>
@@ -722,7 +866,7 @@ function _renderTradeDetail(t) {
   const txSection = `
     <details class="bg-white/[0.03] border border-white/10 rounded-lg mb-1">
       <summary class="py-1.5 min-h-0 text-xs font-mono flex items-center gap-3 px-3" style="color:var(--muted)">
-        transaction_ledger
+        trades
         <span class="opacity-40 font-normal">${txns.length} record${txns.length !== 1 ? 's' : ''}</span>
       </summary>
       <div class="pb-2 px-3">${txSectionBody}</div>
@@ -800,58 +944,9 @@ async function saveSettings(event) {
 // ─────────────────────────────────────────────
 // Watchlist tab
 // ─────────────────────────────────────────────
-let _searchTimer = null;
-function searchPairsDebounced() {
-  clearTimeout(_searchTimer);
-  _searchTimer = setTimeout(searchPairs, 350);
-}
-
-async function searchPairs() {
-  const q = document.getElementById('wl-search').value.trim();
-  const box = document.getElementById('wl-search-results');
-  if (q.length < 1) { box.classList.add('hidden'); return; }
-  try {
-    const res = await fetch(`/api/kraken-pairs?q=${encodeURIComponent(q)}`);
-    const pairs = await res.json();
-    if (!pairs.length) {
-      box.innerHTML = '<div class="p-3 text-sm text-gray-500">No matches found</div>';
-      box.classList.remove('hidden');
-      return;
-    }
-    box.innerHTML = pairs.map((p, i) => `
-      <div class="px-3 py-2 hover:bg-white/5 cursor-pointer flex items-center gap-3 border-b border-white/10 text-sm"
-           onclick='selectPair(${JSON.stringify(p)})'>
-        <span class="font-mono font-bold" style="min-width:120px">${esc(p.altname)}</span>
-        <span class="inline-flex items-center rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${p.source === 'kraken_xstock' ? 'bg-indigo-400/10 text-indigo-400 ring-indigo-400/20' : 'bg-green-400/10 text-green-400 ring-green-400/20'}">${p.source === 'kraken_xstock' ? 'xStock' : 'crypto'}</span>
-        <span class="text-gray-500 text-xs">${esc(p.pair)}</span>
-        <span class="text-gray-500 text-xs ml-auto">${esc(p.search_name)}</span>
-      </div>`).join('');
-    box.classList.remove('hidden');
-  } catch(e) {
-    box.innerHTML = '<div class="p-3 text-sm" style="color:var(--red)">Search failed</div>';
-    box.classList.remove('hidden');
-  }
-}
-
-function selectPair(p) {
-  document.getElementById('wl-search-results').classList.add('hidden');
-  document.getElementById('wl-search').value = p.altname;
-  document.getElementById('wl-ticker').value = p.pair;
-  document.getElementById('wl-pair').value   = p.pair;
-  document.getElementById('wl-source').value = p.source;
-  document.getElementById('wl-aclass').value = p.asset_class;
-  document.getElementById('wl-sname').value  = p.search_name || '';
-  document.getElementById('wl-add-form').classList.remove('hidden');
-  document.getElementById('wl-add-status').textContent = '';
-}
-
-function cancelAdd() {
-  document.getElementById('wl-add-form').classList.add('hidden');
-  document.getElementById('wl-search').value = '';
-}
 
 async function addWatchlistTicker() {
-  const ticker = document.getElementById('wl-ticker').value.trim();
+  const ticker = (document.getElementById('wl-ticker').value || '').trim().toUpperCase();
   const status = document.getElementById('wl-add-status');
   if (!ticker) { status.textContent = 'Ticker required'; return; }
   status.textContent = 'Adding…';
@@ -862,10 +957,8 @@ async function addWatchlistTicker() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ticker:      ticker,
-        pair:        document.getElementById('wl-pair').value.trim() || ticker,
-        source:      document.getElementById('wl-source').value,
         asset_class: document.getElementById('wl-aclass').value,
-        search_name: document.getElementById('wl-sname').value.trim() || null,
+        search_name: (document.getElementById('wl-sname').value || '').trim() || null,
       }),
     });
     if (!res.ok) {
@@ -874,7 +967,8 @@ async function addWatchlistTicker() {
     }
     status.textContent = '✓ Added';
     status.style.color = 'var(--green)';
-    cancelAdd();
+    document.getElementById('wl-ticker').value = '';
+    document.getElementById('wl-sname').value = '';
     loadWatchlist();
   } catch(e) {
     status.textContent = '⚠ ' + e.message;
@@ -920,8 +1014,6 @@ async function loadWatchlist() {
       <table class="w-full whitespace-nowrap text-left">
         <thead class="border-b border-white/10 text-sm/6 text-white"><tr>
           <th class="py-2 pl-4 pr-8 font-semibold sm:pl-6 lg:pl-8">Ticker</th>
-          <th class="py-2 pl-0 pr-8 font-semibold">Pair</th>
-          <th class="py-2 pl-0 pr-8 font-semibold">Source</th>
           <th class="py-2 pl-0 pr-8 font-semibold">Asset Class</th>
           <th class="py-2 pl-0 pr-8 font-semibold">Search Name</th>
           <th class="py-2 pl-0 pr-8 font-semibold">Active</th>
@@ -931,9 +1023,7 @@ async function loadWatchlist() {
         <tbody class="divide-y divide-white/5">
         ${rows.map(r => `<tr class="${r.active ? '' : 'opacity-40'}">
           <td class="py-4 pl-4 pr-8 sm:pl-6 lg:pl-8"><strong class="font-mono text-sm/6 text-white">${esc(r.ticker)}</strong></td>
-          <td class="py-4 pl-0 pr-8 font-mono text-sm/6 text-gray-300">${esc(r.pair || '—')}</td>
-          <td class="py-4 pl-0 pr-8 text-sm/6"><span class="inline-flex items-center rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${r.source === 'kraken_xstock' ? 'bg-indigo-400/10 text-indigo-400 ring-indigo-400/20' : r.source === 'kraken_crypto' ? 'bg-green-400/10 text-green-400 ring-green-400/20' : 'bg-gray-400/10 text-gray-400 ring-gray-400/20'}">${esc(r.source)}</span></td>
-          <td class="py-4 pl-0 pr-8 text-sm/6 text-gray-400">${esc(r.asset_class || 'spot')}</td>
+          <td class="py-4 pl-0 pr-8 text-sm/6 text-gray-400">${esc(r.asset_class || 'stock')}</td>
           <td class="py-4 pl-0 pr-8 text-sm/6 text-gray-400">${esc(r.search_name || '—')}</td>
           <td class="py-4 pl-0 pr-8">
             <label class="toggle-switch">
@@ -946,7 +1036,10 @@ async function loadWatchlist() {
             <button class="rounded-md px-2 py-1 text-xs font-medium text-red-400 hover:bg-white/5" onclick="deleteWatchlistTicker('${esc(r.ticker)}')">✕</button>
           </td>
           <td class="py-4 pl-0 pr-4 text-right sm:pr-6 lg:pr-8">
-            <button class="rounded-md bg-indigo-500/10 px-2.5 py-1 text-xs font-semibold text-indigo-400 ring-1 ring-inset ring-indigo-500/20 hover:bg-indigo-500/20" onclick="runAgent('${esc(r.ticker)}')" ${r.active ? '' : 'disabled'}>▶ Run</button>
+            <div class="flex gap-1.5">
+              <button class="rounded-md bg-indigo-500/10 px-2.5 py-1 text-xs font-semibold text-indigo-400 ring-1 ring-inset ring-indigo-500/20 hover:bg-indigo-500/20" onclick="runAgent('${esc(r.ticker)}')" ${r.active ? '' : 'disabled'} title="Run (skips if no flags)">▶ Run</button>
+              <button class="rounded-md bg-white/5 px-2.5 py-1 text-xs font-semibold text-gray-400 ring-1 ring-inset ring-white/10 hover:bg-white/10" onclick="runAgent('${esc(r.ticker)}', true)" ${r.active ? '' : 'disabled'} title="Force run regardless of flags">⚡ Force</button>
+            </div>
           </td>
         </tr>`).join('')}
         </tbody>
@@ -971,9 +1064,14 @@ document.addEventListener('click', (e) => {
 let _agentSource = null;
 let _liveAgentCounter = 0;
 
-function runAgent(ticker) {
+function runAgent(ticker, force = false) {
   // Close any previous stream
   if (_agentSource) { _agentSource.close(); _agentSource = null; }
+
+  // Track in active runs panel
+  const _uiRunId = `ui-${Date.now()}`;
+  _uiRuns[_uiRunId] = { ticker, stage: 'starting', status: 'running' };
+  refreshActiveRuns();
 
   // Switch to Agent tab
   const agentNav = document.querySelector('#sidebar-nav .nav-item[data-page="agent"]');
@@ -1012,7 +1110,6 @@ function runAgent(ticker) {
     { key: 'technical',  label: 'Technical analyst' },
     { key: 'social',     label: 'Social analyst' },
     { key: 'risk',       label: 'Risk analyst' },
-    { key: 'decision',   label: 'Decision agent' },
     { key: 'trade',      label: 'Trade execution' },
   ];
 
@@ -1028,6 +1125,7 @@ function runAgent(ticker) {
       if (st === 'done')        { icon = '✅'; cls = 'text-green-400'; }
       else if (st === 'active') { icon = '<span class="spinner"></span>'; cls = 'text-indigo-400 font-semibold'; }
       else if (st === 'error')  { icon = '❌'; cls = 'text-red-400'; }
+      else if (st === 'skipped'){ icon = '⏸'; cls = 'text-gray-500'; }
       else                      { icon = '<span class="text-gray-700">○</span>'; cls = 'text-gray-600'; }
       return `<li class="flex items-center gap-2 py-1 ${cls}">${icon} ${esc(s.label)}</li>`;
     }).join('');
@@ -1060,20 +1158,18 @@ function runAgent(ticker) {
   const stepMap = {
     candles_start: 'candles', candles_done: 'candles',
     indicators_start: 'indicators', indicators_done: 'indicators',
-    social_start: 'x_search', social_data: 'x_search', social_chunk: 'x_search',
     technical_done: 'technical',
     social_agent_done: 'social',
     risk_done: 'risk',
-    decision_start: 'decision', decision_done: 'decision',
     trade_start: 'trade', trade_done: 'trade', trade_skipped: 'trade',
   };
   const doneEvents = new Set([
-    'candles_done','indicators_done','social_data',
+    'candles_done','indicators_done',
     'technical_done','social_agent_done','risk_done',
     'decision_done','trade_done','trade_skipped',
   ]);
 
-  _agentSource = new EventSource(`/stream/agent/${encodeURIComponent(ticker)}`);
+  _agentSource = new EventSource(`/stream/agent/${encodeURIComponent(ticker)}${force ? '?force=true' : ''}`);
 
   _agentSource.onmessage = (ev) => {
     try {
@@ -1087,11 +1183,13 @@ function runAgent(ticker) {
         STEPS.forEach((s, i) => { if (i < idx && state[s.key] === 'active') state[s.key] = 'done'; });
         state[key] = doneEvents.has(step) ? 'done' : 'active';
         renderSteps();
+        // Update active runs panel stage
+        if (_uiRuns[_uiRunId]) { _uiRuns[_uiRunId].stage = key; refreshActiveRuns(); }
       }
 
-      // When specialists start, mark all three as active (they run in parallel)
+      // When specialists start, all four run in parallel (social_analyst calls x_search internally)
       if (step === 'specialists_start') {
-        if (state['x_search'] === 'active') state['x_search'] = 'done';
+        state['x_search'] = 'active';
         state['technical'] = 'active';
         state['social'] = 'active';
         state['risk'] = 'active';
@@ -1130,12 +1228,21 @@ function runAgent(ticker) {
         if (resultEl) resultEl.innerHTML += `<div class="text-xs mt-1 text-yellow-400">⚠ ${esc(d.msg || '')}</div>`;
       }
 
+      if (step === 'no_trigger') {
+        // Orchestrator skipped — no flags fired and timer not due
+        STEPS.forEach(s => { if (state[s.key] === 'pending') state[s.key] = 'skipped'; });
+        renderSteps();
+        const resultEl = document.getElementById(`live-result-${lid}`);
+        if (resultEl) resultEl.innerHTML = `<div class="rounded-md bg-gray-400/10 px-3 py-2 text-xs text-gray-400 ring-1 ring-inset ring-gray-400/20">⏸ ${esc(d.msg || 'No flags — orchestrator skipped')}</div>`;
+      }
+
       if (step === 'complete') {
         STEPS.forEach(s => { if (state[s.key] === 'active') state[s.key] = 'done'; });
         renderSteps();
         const row = document.getElementById(`live-row-${lid}`);
         if (row) row.classList.remove('bg-indigo-500/5');
         _agentSource.close(); _agentSource = null;
+        delete _uiRuns[_uiRunId]; refreshActiveRuns();
         // Refresh history after a short delay to show the persisted DB entry
         setTimeout(loadHistory, 1500);
       }
@@ -1146,6 +1253,7 @@ function runAgent(ticker) {
         const resultEl = document.getElementById(`live-result-${lid}`);
         if (resultEl) resultEl.innerHTML += `<div class="rounded-md bg-red-400/10 px-3 py-2 text-xs text-red-400 ring-1 ring-inset ring-red-400/20 mt-2">${esc(d.msg || 'Unknown error')}</div>`;
         _agentSource.close(); _agentSource = null;
+        delete _uiRuns[_uiRunId]; refreshActiveRuns();
       }
     } catch(_) {}
   };
@@ -1154,6 +1262,7 @@ function runAgent(ticker) {
     STEPS.forEach(s => { if (state[s.key] === 'active') state[s.key] = 'done'; });
     renderSteps();
     if (_agentSource) { _agentSource.close(); _agentSource = null; }
+    delete _uiRuns[_uiRunId]; refreshActiveRuns();
   };
 }
 

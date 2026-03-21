@@ -14,21 +14,19 @@ print("=== Resetting paper trading database ===\n")
 r = client.table("positions").delete().neq("id", 0).execute()
 print(f"Deleted positions      : {len(r.data)} rows")
 
-# 2. Delete all transaction ledger entries
-r = client.table("transaction_ledger").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
-print(f"Deleted transactions   : {len(r.data)} rows")
+# 2. Delete all trades
+r = client.table("trades").delete().neq("id", 0).execute()
+print(f"Deleted trades         : {len(r.data)} rows")
 
 # 3. Delete all agent logs
 r = client.table("agent_log").delete().neq("id", 0).execute()
 print(f"Deleted agent_log      : {len(r.data)} rows")
 
-# 3. Delete all signal states (resets last-AI-run timers and signal history)
+# 3. Delete all signal states (resets last-AI-run timers, signal history, and cooldowns)
 r = client.table("signal_state").delete().neq("ticker", "").execute()
 print(f"Deleted signal_state   : {len(r.data)} rows")
 
-# 4. Delete all cooldowns
-r = client.table("cooldown").delete().neq("ticker", "").execute()
-print(f"Deleted cooldowns      : {len(r.data)} rows")
+# 4. (cooldown is now stored in signal_state — no separate table)
 
 # 5. Reset settings: $1000 capital, conservative limits
 # Apply base settings that are guaranteed to exist in the schema

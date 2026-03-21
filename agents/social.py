@@ -36,21 +36,52 @@ Respond with ONLY a valid JSON object — no markdown, no explanation outside th
 
 async def analyze(context: dict) -> dict:
     """
-    context keys:
-      ticker_row - full watchlist row (for building the X query)
+    context keys — two supported calling conventions:
+
+    Bot flow (social agent fetches X itself):
+      ticker_row - full watchlist row {ticker, asset_class, search_name, ...}
+      obv        - {timeframe: float} — OBV values across timeframes
+
+    UI flow (X already fetched by the caller):
+      ticker     - str
+      x_posts    - str — pre-fetched X post text
       obv        - {timeframe: float} — OBV values across timeframes
     """
-    ticker_row = context["ticker_row"]
-    obv        = context.get("obv", {})
+    obv = context.get("obv", {})
 
-    # Fetch X posts directly — social agent owns this data, not the orchestrator
-    loop = asyncio.get_event_loop()
-    x_query = build_x_query(ticker_row)
-    x_posts = await loop.run_in_executor(None, lambda: search_x(x_query))
+    if "x_posts" in context:
+        # X data already provided (e.g. pre-fetched by caller)
+        llm_context = {
+            "ticker":  context["ticker"],
+            "x_posts": context["x_posts"],
+            "obv":     obv,
+        }
+    elif "x_search_query" in context:
+        # Query string provided — call search_x directly
+        ticker = context["ticker"]
+        query  = context["x_search_query"]
+        loop = asyncio.get_event_loop()
+        print(f"  [social] Searching X for {ticker}...")
+        x_posts = await loop.run_in_executor(None, lambda: search_x(query))
+        print(f"  [social] X posts received for {ticker} ({len(x_posts)} chars)")
+        llm_context = {
+            "ticker":  ticker,
+            "x_posts": x_posts,
+            "obv":     obv,
+        }
+    else:
+        # Bot flow: full ticker_row provided, build query from it
+        ticker_row = context["ticker_row"]
+        loop = asyncio.get_event_loop()
+        x_query = build_x_query(ticker_row)
+        ticker = ticker_row["ticker"]
+        print(f"  [social] Searching X for {ticker}...")
+        x_posts = await loop.run_in_executor(None, lambda: search_x(x_query))
+        print(f"  [social] X posts received for {ticker} ({len(x_posts)} chars)")
+        llm_context = {
+            "ticker":  ticker,
+            "x_posts": x_posts,
+            "obv":     obv,
+        }
 
-    llm_context = {
-        "ticker":  ticker_row["ticker"],
-        "x_posts": x_posts,
-        "obv":     obv,
-    }
     return await run_analyst_async(SYSTEM, llm_context)

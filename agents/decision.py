@@ -40,9 +40,6 @@ DECISION HISTORY — use this to avoid repeating mistakes and to stay consistent
 
 POSITION STATE RULES — these are hard constraints, not judgment calls:
 1. If open_position is null (flat): you may open a new position (buy/short) or hold.
-2. If open_position.side == 'short': valid actions are 'hold' or 'cover'. Do NOT output 'short' again.
-3. If open_position.side == 'long': valid actions are 'hold' or 'sell'. Do NOT output 'buy' again.
-4. Never suggest opening a new position in the same direction as an existing one.
 
 ENTRY RULES (only when flat):
 Think like a discretionary trader. You need genuine conviction to enter — not just mechanical signal matching.
@@ -90,11 +87,56 @@ async def analyze(context: dict) -> dict:
     context keys:
       ticker               - str
       current_price        - float
-      open_position        - Flat if no position, else {side, quantity, entry_price, stop_loss, leverage}
-      decision_history     - list of last ≤5 {ts, action, trigger_flags, decision_reasoning, position_side, executed, indicators}
-      portfolio_summary    - {starting_capital, realized_pnl, unrealized_pnl, account_equity, open_position_count, available_cash, drawdown_pct}
+      open_position        - None if flat, else positions row enriched with:
+                             {side, quantity, entry_price, stop_loss, leverage, opened_at,
+                              high_water_price, agent_log_id,
+                              unrealized_pnl_pct, unrealized_pnl_usd, time_in_trade_hrs}
+      decision_history     - list of last ≤5 {ts, action, trigger_flags, decision_reasoning,
+                             position_side, executed, indicators} oldest→newest
+      portfolio_summary    - {starting_capital, realized_pnl, unrealized_pnl, account_equity,
+                             open_position_count, available_cash, drawdown_pct}
       technical_analysis   - output from technical agent
       social_analysis      - output from social agent
       risk_analysis        - output from risk agent
     """
     return await run_analyst_async(SYSTEM, context)
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator system prompt — used by run_orchestrated_decision() in core.py
+# This extends SYSTEM with agent-dispatch workflow + unified JSON output.
+# ---------------------------------------------------------------------------
+
+ORCHESTRATOR_SYSTEM = """\
+You are the orchestrating decision agent for an autonomous multi-agent trading system. \
+You coordinate three specialist sub-agents and synthesise their outputs into a final \
+executable trade decision.
+
+ORCHESTRATION WORKFLOW — invoke all three before producing your response:
+1. Call technical_analyst — pass: ticker, current_price, indicators (multi-timeframe dict), flags
+2. Call social_analyst — pass: ticker, obv, and either x_posts (if already in context) \
+or x_search_query (so it can search X in real time)
+3. Call risk_manager — pass: ticker, current_price, atr, flags, portfolio_summary
+
+After all three respond, apply the decision logic below.
+
+--- DECISION LOGIC ---
+
+""" + SYSTEM.split("Respond with ONLY")[0].rstrip() + """
+
+--- RESPONSE FORMAT ---
+
+Respond with ONLY a valid JSON object — no markdown, no explanation outside the JSON:
+{
+  "technical_analysis": { <verbatim JSON output from technical_analyst> },
+  "social_analysis":    { <verbatim JSON output from social_analyst> },
+  "risk_analysis":      { <verbatim JSON output from risk_manager> },
+  "action": "buy" | "sell" | "short" | "cover" | "hold",
+  "size_usd": <number for entries, null for exits/hold>,
+  "leverage": <1 | 2 | 3>,
+  "stop_loss": <price for entries, null for exits/hold>,
+  "confidence": <integer 0-100>,
+  "specialist_agreement": "full" | "partial" | "conflicting",
+  "reasoning": "<3-5 sentences explaining your holistic judgment — what is the thesis, what are the key signals, and why this action>",
+  "key_contradictions": ["<any notable specialist disagreements or risks that gave you pause>"]
+}"""

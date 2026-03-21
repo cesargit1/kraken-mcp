@@ -3,7 +3,5 @@ nixPkgs = ["curl"]
 
 [phases.install]
 cmds = [
-  "pip install -r requirements.txt",
-  "curl -fsSL https://github.com/krakenfx/kraken-cli/releases/latest/download/kraken-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin",
-  "chmod +x /usr/local/bin/kraken"
+  "pip install -r requirements.txt"
 ]

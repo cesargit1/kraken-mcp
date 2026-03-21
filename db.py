@@ -153,31 +153,31 @@ def get_last_ai_run(ticker: str) -> Optional[datetime]:
 
 
 # ---------------------------------------------------------------------------
-# Cooldown
+# Cooldown (stored in signal_state.cooldown_until)
 # ---------------------------------------------------------------------------
 
 def check_cooldown(ticker: str, event_type: str, window_minutes: int = 30) -> bool:
-    """Return True if ticker+event_type was triggered within the cooldown window (should skip)."""
-    r = (
-        get_client().table("cooldown")
-        .select("triggered_at")
-        .eq("ticker", ticker)
-        .eq("event_type", event_type)
-        .order("triggered_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    if not r.data:
+    """Return True if ticker is within its cooldown window (should skip)."""
+    state = get_signal_state(ticker)
+    if not state or not state.get("cooldown_until"):
         return False
-    last = datetime.fromisoformat(r.data[0]["triggered_at"])
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - last).total_seconds() < window_minutes * 60
+    cu = datetime.fromisoformat(state["cooldown_until"].replace("Z", "+00:00"))
+    if cu.tzinfo is None:
+        cu = cu.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) < cu
 
 
-def set_cooldown(ticker: str, event_type: str) -> None:
-    get_client().table("cooldown").insert(
-        {"ticker": ticker, "event_type": event_type}
+def set_cooldown(ticker: str, event_type: str, window_minutes: int = 30) -> None:
+    """Set cooldown_until on signal_state for this ticker."""
+    from datetime import timedelta
+    until = (datetime.now(timezone.utc) + timedelta(minutes=window_minutes)).isoformat()
+    get_client().table("signal_state").upsert(
+        {
+            "ticker": ticker,
+            "cooldown_until": until,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="ticker",
     ).execute()
 
 
@@ -192,16 +192,15 @@ def log_agent_run(
     social: dict,
     risk: dict,
     decision_reasoning: str,
-    pair: Optional[str] = None,
     trigger_flags: Optional[str] = None,
     position_side: str = "flat",
     indicators_snapshot: Optional[dict] = None,
     executed: bool = False,
     decision_json: Optional[dict] = None,
+    pair: Optional[str] = None,  # deprecated — ignored, kept for call-site compat
 ) -> int:
     payload = {
         "ticker": ticker,
-        "pair": pair,
         "action": action,
         "trigger_flags": trigger_flags,
         "technical_analysis": technical,
@@ -234,7 +233,7 @@ def get_recent_agent_runs(limit: int = 50, offset: int = 0) -> dict:
     client = get_client()
     r = (
         client.table("agent_log")
-        .select("id,ticker,pair,action,trigger_flags,decision_reasoning,position_side,executed,ts", count="exact")
+        .select("id,ticker,action,trigger_flags,decision_reasoning,position_side,executed,ts", count="exact")
         .order("ts", desc=True)
         .range(offset, offset + limit - 1)
         .execute()
@@ -297,18 +296,10 @@ def get_agent_run_by_id(agent_log_id: int) -> dict | None:
 
 
 def get_transactions_for_agent(agent_log_id: int) -> list:
-    """Return all transaction_ledger rows linked to a given agent_log session."""
+    """Return all trades rows linked to a given agent_log session."""
     r = (
-        get_client().table("transaction_ledger")
-        .select(
-            "id,event_time,status,side,is_simulated,is_margin,"
-            "base_asset,quote_asset,pair_symbol,"
-            "quantity,price,gross_amount,gross_currency,"
-            "fee_amount,fee_asset,net_amount,net_currency,"
-            "cost,cost_currency,leverage,order_type,"
-            "transaction_type,transaction_subtype,source_type,"
-            "external_id,order_id,source_command"
-        )
+        get_client().table("trades")
+        .select("*")
         .eq("agent_log_id", agent_log_id)
         .order("event_time", desc=False)
         .execute()
@@ -324,64 +315,35 @@ def log_transaction(
     volume: float,
     notional_usd: float,
     leverage: int,
-    stop_loss: Optional[float],
-    fee: float,
-    pair: Optional[str],
-    order_type: str,
-    source_type: str,
-    is_simulated: bool,
-    execution_result: Optional[dict],
+    fee: float = 0.0,
+    realized_pnl: Optional[float] = None,
 ) -> None:
-    """Record a single exchange transaction receipt linked to an agent_log session."""
-    from datetime import datetime, timezone
+    """Record a paper trade linked to an agent_log session."""
     side = "buy" if action in ("buy", "cover") else "sell"
-    tx_type = "trade"
-    status = "failed" if (execution_result or {}).get("error") else "completed"
-    leverage = leverage or 1  # guard against None from AI returning null
-    get_client().table("transaction_ledger").insert(
-        {
-            "agent_log_id":      agent_log_id,
-            "exchange":          "kraken",
-            "transaction_type":  tx_type,
-            "transaction_subtype": action,
-            "source_type":       source_type,
-            "external_id":       str((execution_result or {}).get("order_id") or f"sim-{agent_log_id}-{action}"),
-            "status":            status,
-            "side":              side,
-            "is_simulated":      is_simulated,
-            "is_margin":         leverage > 1,
-            "event_time":        datetime.now(timezone.utc).isoformat(),
-            "base_asset":        ticker,
-            "quote_asset":       "USD",
-            "pair_symbol":       pair or f"{ticker}/USD",
-            "quantity":          str(volume) if volume else None,
-            "price":             str(current_price) if current_price else None,
-            "gross_amount":      str(notional_usd) if notional_usd else None,
-            "gross_currency":    "USD",
-            "fee_amount":        str(fee) if fee else None,
-            "fee_asset":         "USD",
-            "net_amount":        str(round(notional_usd - fee, 8)) if notional_usd else None,
-            "net_currency":      "USD",
-            "cost":              str(notional_usd) if notional_usd else None,
-            "cost_currency":     "USD",
-            "leverage":          str(leverage),
-            "order_type":        order_type,
-            "trigger_price":     str(stop_loss) if stop_loss else None,
-            "raw_payload":       execution_result or {},
-            "source_command":    "bot.execute_trade",
-        }
-    ).execute()
+    leverage = leverage or 1
+    row: dict = {
+        "agent_log_id": agent_log_id,
+        "ticker":       ticker,
+        "side":         side,
+        "action":       action,
+        "quantity":     volume,
+        "price":        current_price,
+        "cost":         notional_usd,
+        "fee_amount":   fee,
+        "leverage":     leverage,
+        "status":       "completed",
+        "event_time":   datetime.now(timezone.utc).isoformat(),
+    }
+    if realized_pnl is not None:
+        row["realized_pnl"] = realized_pnl
+    get_client().table("trades").insert(row).execute()
 
 
 def get_recent_transactions(limit: int = 30) -> list[dict]:
-    """Return recent transaction_ledger rows for the Recent Trades UI."""
+    """Return recent trades for the Recent Trades UI."""
     r = (
-        get_client().table("transaction_ledger")
-        .select(
-            "id,agent_log_id,event_time,status,side,base_asset,pair_symbol,"
-            "transaction_subtype,quantity,price,gross_amount,leverage,"
-            "fee_amount,is_simulated,order_type,trigger_price"
-        )
+        get_client().table("trades")
+        .select("*")
         .order("event_time", desc=True)
         .limit(limit)
         .execute()
@@ -550,7 +512,7 @@ def get_closed_positions_full(limit: int = 50) -> list[dict]:
     Closed positions from two sources merged:
       1. Primary:  positions table rows where closed_at IS NOT NULL.
       2. Fallback: agent_log sell/cover (executed=True) rows that have no matching
-                   positions row — reconstructed using transaction_ledger prices.
+                   positions row — reconstructed using trades table prices.
     This ensures history is visible even when a positions row was lost.
     Returned list is sorted by closed_at desc, capped at `limit`.
     """
@@ -594,9 +556,9 @@ def get_closed_positions_full(limit: int = 50) -> list[dict]:
     tickers  = list({s["ticker"] for s in orphans})
     sell_ids = [s["id"] for s in orphans]
 
-    # 2. transaction_ledger rows for those sells (close price / qty)
+    # 2. trades rows for those sells (close price / qty)
     sell_tx_r = (
-        get_client().table("transaction_ledger")
+        get_client().table("trades")
         .select("agent_log_id,price,quantity")
         .in_("agent_log_id", sell_ids)
         .execute()
@@ -616,12 +578,12 @@ def get_closed_positions_full(limit: int = 50) -> list[dict]:
     )
     buy_rows = buy_r.data or []
 
-    # 4. transaction_ledger for those buys (entry price)
+    # 4. trades for those buys (entry price)
     buy_ids = [b["id"] for b in buy_rows]
     buy_tx_by_id: dict = {}
     if buy_ids:
         buy_tx_r = (
-            get_client().table("transaction_ledger")
+            get_client().table("trades")
             .select("agent_log_id,price")
             .in_("agent_log_id", buy_ids)
             .execute()

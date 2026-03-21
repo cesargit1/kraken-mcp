@@ -1,31 +1,17 @@
 """
-core.py — shared runtime for the Kraken paper trading bot.
-Handles: Grok-4 client, kraken-cli execution, tool dispatch (paper only).
+core.py — shared runtime for the paper trading bot.
+Handles: Grok client (xAI API), X search, and LLM analyst helpers.
 """
 
 import os
+import re
 import json
-import shutil
-import subprocess
-import threading
-import time
-from enum import Enum
+import asyncio
 from openai import OpenAI
 from dotenv import load_dotenv
 from retry import retry_call
 
 load_dotenv()
-
-# ---------------------------------------------------------------------------
-# Mode (paper only — there is no live trading)
-# ---------------------------------------------------------------------------
-
-class Mode(str, Enum):
-    PAPER = "paper"
-
-MODE = Mode.PAPER
-_default_bin = os.path.expanduser("~/.cargo/bin/kraken")
-KRAKEN_BIN = _default_bin if os.path.isfile(_default_bin) else (shutil.which("kraken") or _default_bin)
 
 
 # ---------------------------------------------------------------------------
@@ -34,23 +20,18 @@ KRAKEN_BIN = _default_bin if os.path.isfile(_default_bin) else (shutil.which("kr
 
 def get_search_name(ticker_row: dict) -> str:
     """Human-readable name for social media search queries.
-    Uses the explicit search_name column if set, otherwise derives from ticker."""
+    Uses the explicit search_name column if set, otherwise falls back to the ticker."""
     name = ticker_row.get("search_name")
     if name:
         return name
-    # Fallback: strip 'x' suffix for xStocks, use ticker as-is otherwise
-    ticker = ticker_row["ticker"]
-    source = ticker_row.get("source", "")
-    if "xstock" in source:
-        return ticker.removesuffix("x")
-    return ticker
+    return ticker_row["ticker"]
 
 
 def build_x_query(ticker_row: dict) -> str:
     """Build an X search query appropriate to the asset type."""
     name = get_search_name(ticker_row)
-    source = ticker_row.get("source", "")
-    if "crypto" in source:
+    asset_class = ticker_row.get("asset_class", "stock")
+    if asset_class == "crypto":
         return (
             f"Search X for posts about ${name} cryptocurrency in the last hour. "
             "Include post texts, volume trends, and any notable news or sentiment."
@@ -61,20 +42,15 @@ def build_x_query(ticker_row: dict) -> str:
     )
 
 
-# Global rate limiter — caps concurrent Kraken CLI subprocesses across all
-# callers (candle fetches, price checks, balance calls, order execution).
-# With 10 tickers × 4 timeframes = 40 potential simultaneous calls; this
-# keeps at most 3 in flight at any time and spaces them 200 ms apart.
-_KRAKEN_LOCK  = threading.Semaphore(3)
-_KRAKEN_DELAY = 0.2  # seconds between calls
-
 # ---------------------------------------------------------------------------
-# Grok-4 client (lazy — created on first use so missing key only fails at
+# Grok client (lazy — created on first use so missing key only fails at
 # AI call time, not at import/startup)
 # ---------------------------------------------------------------------------
 
 _client: OpenAI | None = None
-MODEL = "grok-4-latest"
+MODEL = "grok-4.20-multi-agent-0309"
+# Multi-agent orchestration can take longer than a single x_search call
+_REQUEST_TIMEOUT = 300.0  # seconds — applies to all Responses API calls
 
 
 def _get_client() -> OpenAI:
@@ -83,240 +59,10 @@ def _get_client() -> OpenAI:
         api_key = os.getenv("XAI_API_KEY")
         if not api_key:
             raise RuntimeError("XAI_API_KEY environment variable is not set")
-        _client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+        # Default openai SDK timeout is 600s (10 min) — far too long for x_search
+        _client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1", timeout=_REQUEST_TIMEOUT)
     return _client
 
-# ---------------------------------------------------------------------------
-# kraken-cli runner
-# ---------------------------------------------------------------------------
-
-def _run_kraken_once(args: list[str]) -> dict:
-    """Single attempt to execute a kraken-cli command. Returns parsed JSON."""
-    with _KRAKEN_LOCK:
-        time.sleep(_KRAKEN_DELAY)
-        try:
-            result = subprocess.run(
-                [KRAKEN_BIN] + args + ["-o", "json"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.stdout.strip():
-                try:
-                    return json.loads(result.stdout)
-                except json.JSONDecodeError:
-                    return {"error": result.stdout}
-            return {"error": result.stderr or "empty response"}
-        except subprocess.TimeoutExpired:
-            return {"error": "kraken-cli timed out"}
-        except FileNotFoundError:
-            return {"error": f"kraken not found at {KRAKEN_BIN}"}
-        except Exception as e:
-            return {"error": str(e)}
-
-
-def run_kraken(args: list[str]) -> dict:
-    """Execute a kraken-cli command with retries."""
-    if not os.path.isfile(KRAKEN_BIN):
-        return {"error": f"kraken not found at {KRAKEN_BIN}"}
-    return retry_call(
-        _run_kraken_once, args,
-        is_error=lambda r: isinstance(r, dict) and "error" in r,
-        label="kraken",
-    )
-
-# ---------------------------------------------------------------------------
-# Unified tool dispatcher — paper or live
-# ---------------------------------------------------------------------------
-
-def dispatch_tool(name: str, args: dict) -> str:
-    """Route tool calls to paper kraken-cli commands."""
-
-    asset_flags = []
-    if args.get("asset_class") and args["asset_class"] != "spot":
-        asset_flags = ["--asset-class", args["asset_class"]]
-
-    limit_flags = []
-    if args.get("order_type") == "limit" and "price" in args:
-        limit_flags = ["--type", "limit", "--price", str(args["price"])]
-
-    if name == "ticker":
-        cmd = ["ticker", args["pair"]] + asset_flags
-
-    elif name == "orderbook":
-        cmd = ["orderbook", args["pair"]]
-        if "count" in args:
-            cmd += ["--count", str(args["count"])]
-
-    elif name == "ohlc":
-        cmd = ["ohlc", args["pair"]]
-        if "interval" in args:
-            cmd += ["--interval", str(args["interval"])]
-
-    elif name == "balance":
-        cmd = ["paper", "balance"]
-
-    elif name == "buy":
-        vol = str(args["volume"])
-        leverage_flags = ["--leverage", str(args["leverage"])] if args.get("leverage", 1) > 1 else []
-        cmd = ["paper", "buy", args["pair"], vol] + limit_flags + leverage_flags
-
-    elif name == "sell":
-        vol = str(args["volume"])
-        leverage_flags = ["--leverage", str(args["leverage"])] if args.get("leverage", 1) > 1 else []
-        reduce_flags = ["--reduce-only"] if args.get("reduce_only") else []
-        cmd = ["paper", "sell", args["pair"], vol] + limit_flags + leverage_flags + reduce_flags
-
-    elif name == "cancel_order":
-        cmd = ["paper", "cancel", args["order_id"]]
-
-    elif name == "open_orders":
-        cmd = ["paper", "orders"]
-
-    elif name == "status":
-        cmd = ["paper", "status"]
-
-    elif name == "trade_history":
-        cmd = ["paper", "history"]
-
-    else:
-        return json.dumps({"error": f"unknown tool: {name}"})
-
-    result = run_kraken(cmd)
-    return json.dumps(result, indent=2)
-
-# ---------------------------------------------------------------------------
-# Shared tool schema
-# ---------------------------------------------------------------------------
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "ticker",
-            "description": "Get live price and 24h stats. For xStocks use pair like 'AAPLx/USD' and asset_class='tokenized_asset'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pair": {"type": "string"},
-                    "asset_class": {"type": "string", "enum": ["spot", "tokenized_asset", "forex"]},
-                },
-                "required": ["pair"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "orderbook",
-            "description": "Get live order book (bids/asks) for a pair.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pair": {"type": "string"},
-                    "count": {"type": "integer", "description": "Depth per side (default 10)"},
-                },
-                "required": ["pair"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ohlc",
-            "description": "Get OHLC candlestick data for technical analysis.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pair": {"type": "string"},
-                    "interval": {"type": "integer", "description": "Minutes: 1,5,15,30,60,240,1440"},
-                },
-                "required": ["pair"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "balance",
-            "description": "Get current account balances.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "buy",
-            "description": "Place a buy order. Market or limit. Use leverage>1 for margin longs (up to 3x on xStocks top 10).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pair": {"type": "string"},
-                    "volume": {"type": "number"},
-                    "order_type": {"type": "string", "enum": ["market", "limit"]},
-                    "price": {"type": "number", "description": "Limit price (limit orders only)"},
-                    "leverage": {"type": "integer", "description": "Margin multiplier: 1 (default, no margin), 2, or 3"},
-                    "asset_class": {"type": "string", "enum": ["spot", "tokenized_asset", "forex"]},
-                },
-                "required": ["pair", "volume"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "sell",
-            "description": "Place a sell order. Use leverage>1 to open a short position on margin. Use reduce_only=true to close an existing margin position.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pair": {"type": "string"},
-                    "volume": {"type": "number"},
-                    "order_type": {"type": "string", "enum": ["market", "limit"]},
-                    "price": {"type": "number", "description": "Limit price (limit orders only)"},
-                    "leverage": {"type": "integer", "description": "Margin multiplier: 1 (default), 2, or 3. Set >1 to short."},
-                    "reduce_only": {"type": "boolean", "description": "True to close an existing margin position only"},
-                    "asset_class": {"type": "string", "enum": ["spot", "tokenized_asset", "forex"]},
-                },
-                "required": ["pair", "volume"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_orders",
-            "description": "List all open orders.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "cancel_order",
-            "description": "Cancel an open order by ID.",
-            "parameters": {
-                "type": "object",
-                "properties": {"order_id": {"type": "string"}},
-                "required": ["order_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "status",
-            "description": "Get portfolio summary: total value, P&L, positions.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "trade_history",
-            "description": "Get filled trade history.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-]
 
 # ---------------------------------------------------------------------------
 # X Search helper (uses Responses API — separate from chat completions loop)
@@ -354,6 +100,7 @@ def search_x_stream(query: str):
                 delta = getattr(event, "delta", None)
                 if delta:
                     yield delta
+
 
 # ---------------------------------------------------------------------------
 # Agent runner
@@ -400,37 +147,91 @@ async def run_analyst_async(system_prompt: str, context: dict, model: str = MODE
     return await loop.run_in_executor(None, lambda: run_analyst(system_prompt, context, model))
 
 
-def run_agent(system_prompt: str, user_prompt: str, verbose: bool = True, model: str = MODEL) -> str:
+# ---------------------------------------------------------------------------
+# Multi-agent orchestrated decision (grok-4.20-multi-agent-0309)
+# ---------------------------------------------------------------------------
+
+async def run_orchestrated_decision(context: dict, settings: dict) -> dict:
     """
-    Run a single agent turn with full tool-call loop.
-    Returns the final text response.
+    Manually orchestrated pipeline:
+      1. technical_analyst, social_analyst, risk_manager run in parallel
+      2. decision agent synthesises all three outputs into a final trade decision
+
+    context keys (combined payload):
+      ticker           - str
+      current_price    - float
+      indicators       - {timeframe: {...}} — for technical_analyst
+      flags            - list[str]          — for technical_analyst / risk_manager
+      x_search_query   - str (bot flow: social agent calls search_x internally)
+      x_posts          - str (UI pre-fetch: skip search_x)
+      obv              - {timeframe: float} — for social_analyst
+      atr              - {timeframe: float} — for risk_manager
+      portfolio_summary- dict              — for risk_manager + decision
+      open_position    - dict | None
+      decision_history - list
+
+    Returns a unified dict:
+      technical_analysis, social_analysis, risk_analysis  — specialist outputs
+      action, size_usd, leverage, stop_loss, confidence,
+      specialist_agreement, reasoning, key_contradictions  — decision fields
     """
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": user_prompt},
-    ]
+    from agents.technical import analyze as technical_analyze
+    from agents.social    import analyze as social_analyze
+    from agents.risk      import analyze as risk_analyze
+    from agents.decision  import analyze as decision_analyze
 
-    while True:
-        response = _get_client().chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-        )
-        msg = response.choices[0].message
+    ticker = context["ticker"]
 
-        if not msg.tool_calls:
-            return msg.content
+    technical_context = {
+        "ticker":        ticker,
+        "current_price": context.get("current_price"),
+        "indicators":    context.get("indicators", {}),
+        "flags":         context.get("flags", []),
+    }
 
-        messages.append(msg)
-        for tc in msg.tool_calls:
-            args = json.loads(tc.function.arguments)
-            if verbose:
-                arg_str = ", ".join(f"{k}={v}" for k, v in args.items())
-                print(f"  \033[90m[paper] {tc.function.name}({arg_str})\033[0m", flush=True)
-            result = dispatch_tool(tc.function.name, args)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result,
-            })
+    social_context = {
+        "ticker": ticker,
+        "obv":    context.get("obv", {}),
+    }
+    if "x_posts" in context:
+        social_context["x_posts"] = context["x_posts"]
+    else:
+        social_context["x_search_query"] = context.get("x_search_query", "")
+
+    risk_context = {
+        "ticker":            ticker,
+        "current_price":     context.get("current_price"),
+        "atr":               context.get("atr", {}),
+        "flags":             context.get("flags", []),
+        "portfolio_summary": context.get("portfolio_summary", {}),
+        "settings":          settings,
+    }
+
+    # ── Step 1: run all three specialists in parallel ──────────────────────
+    technical, social, risk = await asyncio.gather(
+        technical_analyze(technical_context),
+        social_analyze(social_context),
+        risk_analyze(risk_context),
+    )
+
+    # ── Step 2: decision agent synthesises ────────────────────────────────
+    decision_context = {
+        "ticker":             ticker,
+        "current_price":      context.get("current_price"),
+        "technical_analysis": technical,
+        "social_analysis":    social,
+        "risk_analysis":      risk,
+        "open_position":      context.get("open_position"),
+        "decision_history":   context.get("decision_history", []),
+        "portfolio_summary":  context.get("portfolio_summary", {}),
+    }
+
+    decision = await decision_analyze(decision_context)
+
+    return {
+        **decision,
+        "technical_analysis": technical,
+        "social_analysis":    social,
+        "risk_analysis":      risk,
+    }
+

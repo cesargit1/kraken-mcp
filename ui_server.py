@@ -1,5 +1,5 @@
 """
-ui_server.py — FastAPI dashboard for the xStocks trading bot.
+ui_server.py — FastAPI dashboard for the paper trading bot.
 
 Run with:
     uvicorn ui_server:app --reload --port 8000
@@ -24,11 +24,7 @@ import db
 import fetch as fetcher
 import indicators as ind
 import bot
-from core import run_kraken, search_x, search_x_stream
-from agents.technical import analyze as technical_analyze
-from agents.social    import analyze as social_analyze
-from agents.risk      import analyze as risk_analyze
-from agents.decision  import analyze as decision_analyze
+from core import run_orchestrated_decision, build_x_query
 
 
 @asynccontextmanager
@@ -129,9 +125,7 @@ async def api_add_watchlist(request: Request):
         raise HTTPException(status_code=400, detail="ticker is required")
     row = {
         "ticker":      ticker,
-        "source":      body.get("source", "kraken_crypto"),
-        "pair":        body.get("pair") or ticker,
-        "asset_class": body.get("asset_class", "spot"),
+        "asset_class": body.get("asset_class", "stock"),
         "search_name": body.get("search_name") or None,
         "active":      True,
     }
@@ -147,7 +141,7 @@ async def api_add_watchlist(request: Request):
 @app.patch("/api/watchlist/{ticker}")
 async def api_patch_watchlist(ticker: str, request: Request):
     body = await request.json()
-    allowed = {"active", "search_name", "pair", "asset_class", "source"}
+    allowed = {"active", "search_name", "asset_class"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="No valid fields to update")
@@ -175,71 +169,6 @@ async def api_delete_watchlist(ticker: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/kraken-pairs")
-async def api_kraken_pairs(q: str = ""):
-    """Search Kraken tradable pairs. Queries both spot and tokenized_asset classes."""
-    if len(q) < 1:
-        raise HTTPException(status_code=400, detail="query 'q' required (min 1 char)")
-    loop = asyncio.get_running_loop()
-    query_upper = q.upper()
-
-    async def fetch_pairs(aclass: str | None):
-        args = ["pairs"]
-        if aclass:
-            args += ["--aclass", aclass]
-        return await loop.run_in_executor(None, lambda: run_kraken(args))
-
-    spot_data, xstock_data = await asyncio.gather(
-        fetch_pairs(None),
-        fetch_pairs("tokenized_asset"),
-    )
-
-    results = []
-    seen = set()
-    for data, source, ac in [
-        (xstock_data, "kraken_xstock", "tokenized_asset"),
-        (spot_data, "kraken_crypto", "spot"),
-    ]:
-        if not isinstance(data, dict) or "error" in data:
-            continue
-        for pair_key, info in data.items():
-            if not isinstance(info, dict):
-                continue
-            altname = info.get("altname", "")
-            base = info.get("base", "")
-            wsname = info.get("wsname", "")
-            # Match against query
-            if not (query_upper in pair_key.upper() or
-                    query_upper in altname.upper() or
-                    query_upper in base.upper() or
-                    query_upper in wsname.upper()):
-                continue
-            # Only USD-quoted pairs, skip duplicates
-            quote = info.get("quote", "")
-            if quote not in ("ZUSD", "USD"):
-                continue
-            if pair_key in seen:
-                continue
-            seen.add(pair_key)
-            # Derive a search_name
-            if ac == "tokenized_asset":
-                sname = base.removesuffix("x") if base.endswith("x") else base
-            else:
-                sname = altname.replace("USD", "").replace("XBT", "Bitcoin BTC").replace("ETH", "Ethereum ETH") or base
-            results.append({
-                "pair":         pair_key,
-                "altname":      altname,
-                "base":         base,
-                "wsname":       wsname,
-                "source":       source,
-                "asset_class":  ac,
-                "search_name":  sname,
-            })
-    # Sort: xStocks first, then by altname
-    results.sort(key=lambda r: (0 if r["source"] == "kraken_xstock" else 1, r["altname"]))
-    return results[:50]
-
-
 @app.get("/api/positions")
 async def api_positions():
     loop = asyncio.get_running_loop()
@@ -250,19 +179,14 @@ async def api_positions():
     watchlist_tickers = {r["ticker"] for r in watchlist_all}
     price_rows = [r for r in watchlist_all
                   if r.get("active") or r["ticker"] in open_tickers]
-    # For open positions whose ticker isn't in the watchlist at all, fall back to
-    # using the ticker itself as the Kraken pair name (e.g. "SOLUSD").
+    # For open positions whose ticker isn’t in the watchlist at all, add it
     for t in open_tickers - watchlist_tickers:
-        price_rows.append({"ticker": t, "pair": t, "asset_class": "spot"})
+        price_rows.append({"ticker": t})
     async def fetch_price(row):
         try:
             p = await loop.run_in_executor(
                 None,
-                lambda r=row: bot.get_current_price(
-                    r.get("pair", r["ticker"]),
-                    r.get("asset_class", "spot"),
-                    r["ticker"],
-                ),
+                lambda r=row: bot.get_current_price(r["ticker"]),
             )
             return row["ticker"], p
         except Exception:
@@ -317,7 +241,7 @@ async def api_positions():
             for p in open_positions:
                 p["reasoning"] = reasons_map.get(p["trade_id"], "")
 
-    # Recent trades from transaction_ledger
+    # Recent trades
     trades = await loop.run_in_executor(None, lambda: db.get_recent_transactions(30))
 
     # Computed portfolio summary
@@ -378,6 +302,56 @@ async def api_positions():
     }
 
 
+@app.get("/api/positions/prices")
+async def api_position_prices():
+    """Lightweight endpoint: refetch current prices + recalculate P&L for all open positions."""
+    loop = asyncio.get_running_loop()
+    raw_positions = db.get_all_open_positions()
+    if not raw_positions:
+        return {"positions": [], "summary": {"total_pnl": 0, "pnl_pct": None, "total_margin_cost": 0}}
+
+    async def _fetch_one(pos):
+        ticker  = pos["ticker"]
+        price   = await loop.run_in_executor(None, lambda t=ticker: bot.get_current_price(t))
+        entry   = pos.get("entry_price") or 0
+        volume  = pos.get("quantity") or 0
+        lev     = pos.get("leverage") or 1
+        side    = pos.get("side", "long")
+        notional    = entry * volume
+        margin_cost = round(db.calc_margin_cost(notional, lev, pos.get("opened_at")), 2)
+        entry_fee   = round(db.calc_trade_fee(notional), 6)
+        pnl = None
+        if price and entry and volume:
+            raw_pnl = (
+                (price - entry) * volume * lev if side == "long"
+                else (entry - price) * volume * lev
+            )
+            pnl = round(raw_pnl - margin_cost - entry_fee, 2)
+        return {
+            "trade_id":      pos.get("agent_log_id"),
+            "ticker":        ticker,
+            "current_price": price,
+            "pnl":           pnl,
+            "margin_cost":   margin_cost,
+        }
+
+    results    = await asyncio.gather(*[_fetch_one(p) for p in raw_positions])
+    total_pnl  = sum(r["pnl"] for r in results if r["pnl"] is not None)
+    total_cost = sum(
+        ((p.get("entry_price") or 0) * (p.get("quantity") or 0)) / max(p.get("leverage") or 1, 1)
+        for p in raw_positions
+    )
+    total_margin_cost = sum(r["margin_cost"] for r in results)
+    return {
+        "positions": list(results),
+        "summary": {
+            "total_pnl":         round(total_pnl, 2),
+            "pnl_pct":           round((total_pnl / total_cost) * 100, 2) if total_cost else None,
+            "total_margin_cost": round(total_margin_cost, 2),
+        },
+    }
+
+
 @app.get("/api/candles")
 async def api_candles(ticker: str, timeframe: str = "1h", limit: int = 200):
     """Return OHLCV candles for a ticker/timeframe from the DB."""
@@ -414,7 +388,7 @@ async def api_put_settings(request: Request):
 # SSE agent stream
 # ---------------------------------------------------------------------------
 
-async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
+async def _agent_stream(ticker: str, force: bool = False) -> AsyncGenerator[str, None]:
     try:
         # Resolve ticker row (allow inactive tickers for manual UI runs)
         all_rows = db.get_all_watchlist_tickers()
@@ -427,14 +401,26 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
 
         # ── 1. Candles ───────────────────────────────────────────────────────
         yield sse({"step": "candles_start", "ticker": ticker})
-        await loop.run_in_executor(None, lambda: fetcher.update_candles(ticker_row))
+        _task = asyncio.ensure_future(
+            loop.run_in_executor(None, lambda: fetcher.update_candles(ticker_row))
+        )
+        while not _task.done():
+            await asyncio.sleep(8)
+            if not _task.done():
+                yield ": keep-alive\n\n"
+        await _task  # re-raises any exception from the thread
         yield sse({"step": "candles_done", "ticker": ticker})
 
         # ── 2. Indicators ────────────────────────────────────────────────────
         yield sse({"step": "indicators_start", "ticker": ticker})
-        all_indicators = await loop.run_in_executor(
-            None, lambda: ind.compute_all_timeframes(ticker_row)
+        _task = asyncio.ensure_future(
+            loop.run_in_executor(None, lambda: ind.compute_all_timeframes(ticker_row))
         )
+        while not _task.done():
+            await asyncio.sleep(8)
+            if not _task.done():
+                yield ": keep-alive\n\n"
+        all_indicators = await _task  # re-raises any exception from the thread
         flags = ind.any_flags(all_indicators)
         slim_ind = {
             tf: {
@@ -446,97 +432,129 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
         yield sse({"step": "indicators_done", "ticker": ticker,
                    "flags": flags, "indicators": slim_ind})
 
+        # ── Flag + timer gate ──────────────────────────────────────────────
+        if not force:
+            last_ai = await loop.run_in_executor(None, lambda: db.get_last_ai_run(ticker))
+            ai_timer_min = (await loop.run_in_executor(None, db.get_settings)).get("ai_timer_min", 60)
+            timer_expired = (
+                last_ai is None
+                or (datetime.now(timezone.utc) - last_ai).total_seconds() >= ai_timer_min * 60
+            )
+            if not flags and not timer_expired:
+                yield sse({"step": "no_trigger", "ticker": ticker,
+                           "msg": f"No flags triggered and timer not yet due — skipping orchestrator"})
+                yield sse({"step": "complete", "ticker": ticker})
+                return
         # ── 3. Current price ─────────────────────────────────────────────────
-        pair        = ticker_row.get("pair", ticker)
-        asset_class = ticker_row.get("asset_class", "spot")
         current_price = await loop.run_in_executor(
-            None, lambda: bot.get_current_price(pair, asset_class)
+            None, lambda: bot.get_current_price(ticker)
         )
         yield sse({"step": "price", "ticker": ticker, "price": current_price})
 
-        # ── 4. X social search (streamed) ──────────────────────────────────────
-        from core import get_search_name, build_x_query
-        search_name = get_search_name(ticker_row)
-        x_query = build_x_query(ticker_row)
-        yield sse({"step": "social_start", "ticker": ticker,
-                   "query": search_name})
-
-        # Stream chunks from xAI Responses API in a thread so we don't block asyncio
-        x_chunks: list[str] = []
-
-        def _stream_x():
-            for chunk in search_x_stream(x_query):
-                x_chunks.append(chunk)
-
-        # Kick off the blocking generator in an executor,
-        # but drain chunks to the SSE client as they arrive.
-        stream_task = loop.run_in_executor(None, _stream_x)
-
-        # Poll for new chunks while the background thread is running
-        sent = 0
-        while not stream_task.done():
-            await asyncio.sleep(0.15)
-            while sent < len(x_chunks):
-                yield sse({"step": "social_chunk", "ticker": ticker,
-                           "chunk": x_chunks[sent]})
-                sent += 1
-        await stream_task  # propagate any exception
-
-        # Flush any remaining chunks
-        while sent < len(x_chunks):
-            yield sse({"step": "social_chunk", "ticker": ticker,
-                       "chunk": x_chunks[sent]})
-            sent += 1
-
-        x_data = "".join(x_chunks)
-        yield sse({"step": "social_data", "ticker": ticker,
-                   "snippet": x_data[:600]})
-
-        # ── 5. Build specialist inputs ────────────────────────────────────
-        technical_context = {
-            "ticker":        ticker,
-            "current_price": current_price,
-            "indicators":    all_indicators,
-            "flags":         flags,
-        }
-        social_context = {
-            "ticker":  ticker,
-            "x_posts": x_data,
-            "obv":     {tf: v.get("obv") for tf, v in all_indicators.items()},
-        }
+        # ── 4. Context data (portfolio summary, settings) ───────────────────
         settings = await loop.run_in_executor(None, db.get_settings)
-        risk_context = {
-            "ticker":        ticker,
-            "current_price": current_price,
-            "atr":           {tf: v.get("atr") for tf, v in all_indicators.items()},
-            "flags":         flags,
-            "settings":      settings,
-        }
 
-        # ── 6. Specialists (parallel) ────────────────────────────────────────
-        yield sse({"step": "specialists_start", "ticker": ticker})
-        technical, social_result, risk = await asyncio.gather(
-            technical_analyze(technical_context),
-            social_analyze(social_context),
-            risk_analyze(risk_context),
+        # Build portfolio_summary for risk agent
+        _open_pos   = await loop.run_in_executor(None, db.get_all_open_positions)
+        _realized   = await loop.run_in_executor(None, db.get_realized_pnl)
+        _paper_cap  = settings["paper_capital"]
+        _total_cost = sum(
+            ((p.get("entry_price") or 0) * (p.get("quantity") or 0)) / max(p.get("leverage") or 1, 1)
+            for p in _open_pos
         )
-        yield sse({"step": "technical_done", "ticker": ticker, "result": technical})
-        yield sse({"step": "social_agent_done", "ticker": ticker, "result": social_result})
-        yield sse({"step": "risk_done", "ticker": ticker, "result": risk})
-
-        # ── 7. Decision ──────────────────────────────────────────────────────
-        yield sse({"step": "decision_start", "ticker": ticker})
-        open_position = await loop.run_in_executor(None, lambda: db.get_open_position(ticker))
-        decision_context = {
-            "ticker":             ticker,
-            "current_price":      current_price,
-            "open_position":      open_position,
-            "technical_analysis": technical,
-            "social_analysis":    social_result,
-            "risk_analysis":      risk,
+        _unreal_pnl = 0.0
+        for _p in _open_pos:
+            _ep  = _p.get("entry_price") or 0
+            _qty = _p.get("quantity") or 0
+            _lev = _p.get("leverage") or 1
+            _s   = _p.get("side", "long")
+            if _ep and _qty:
+                # Use current_price for the active ticker; entry price (→ 0 contribution) for others
+                _cp  = current_price if _p.get("ticker") == ticker else _ep
+                _raw = (_cp - _ep) * _qty * _lev if _s == "long" else (_ep - _cp) * _qty * _lev
+                _unreal_pnl += _raw - db.calc_margin_cost(_ep * _qty, _lev, _p.get("opened_at"))
+        _equity     = round(_paper_cap + _realized + _unreal_pnl, 2)
+        _avail_cash = round(_paper_cap - _total_cost + _realized, 2)
+        _drawdown   = round(((_equity - _paper_cap) / _paper_cap) * 100, 2) if _paper_cap else 0.0
+        portfolio_summary = {
+            "starting_capital":    _paper_cap,
+            "realized_pnl":        round(_realized, 2),
+            "unrealized_pnl":      round(_unreal_pnl, 2),
+            "account_equity":      _equity,
+            "open_position_count": len(_open_pos),
+            "available_cash":      _avail_cash,
+            "drawdown_pct":        _drawdown,
         }
-        decision = await decision_analyze(decision_context)
-        yield sse({"step": "decision_done", "ticker": ticker, "result": decision})
+
+        # ── 5. Multi-agent orchestration: technical + social(x_search) + risk in parallel ──
+        yield sse({"step": "specialists_start", "ticker": ticker})
+
+        # Enrich open_position with P&L for the decision maker
+        open_position_raw = await loop.run_in_executor(None, lambda: db.get_open_position(ticker))
+        decision_history  = await loop.run_in_executor(None, lambda: db.get_ticker_decision_history(ticker, limit=5))
+        enriched_position = None
+        if open_position_raw and current_price:
+            _ep  = open_position_raw.get("entry_price") or 0
+            _sid = open_position_raw.get("side", "long")
+            _qty = open_position_raw.get("quantity") or 0
+            _lev = open_position_raw.get("leverage") or 1
+            _raw_usd = (current_price - _ep) * _qty * _lev if _sid == "long" else (_ep - current_price) * _qty * _lev
+            _accrued = db.calc_margin_cost(_ep * _qty, _lev, open_position_raw.get("opened_at"))
+            _net_usd = round(_raw_usd - _accrued, 2)
+            _margin_cap = _ep * _qty
+            _signed_pct = round(_net_usd / _margin_cap * 100, 2) if _margin_cap else 0.0
+            _opened_at_str = open_position_raw.get("opened_at")
+            _hrs_open = None
+            if _opened_at_str:
+                try:
+                    from datetime import timezone as _tz2
+                    from datetime import datetime as _dt2
+                    _opened_dt = _dt2.fromisoformat(_opened_at_str.replace("Z", "+00:00"))
+                    _hrs_open  = round((_dt2.now(_tz2.utc) - _opened_dt).total_seconds() / 3600, 1)
+                except Exception:
+                    pass
+            enriched_position = {
+                **open_position_raw,
+                "unrealized_pnl_pct": _signed_pct,
+                "unrealized_pnl_usd": _net_usd,
+                "time_in_trade_hrs":  _hrs_open,
+            }
+        open_position = open_position_raw
+
+        # Build unified context — orchestrator dispatches all 3 sub-agents in parallel;
+        # social_analyst calls x_search internally (not pre-fetched here)
+        full_context = {
+            "ticker":            ticker,
+            "current_price":     current_price,
+            "indicators":        all_indicators,
+            "flags":             flags,
+            "x_search_query":    build_x_query(ticker_row),  # social_analyst calls x_search
+            "obv":               {tf: v.get("obv") for tf, v in all_indicators.items()},
+            "atr":               {tf: v.get("atr") for tf, v in all_indicators.items()},
+            "portfolio_summary": portfolio_summary,
+            "open_position":     enriched_position,
+            "decision_history":  decision_history,
+        }
+
+        _task = asyncio.ensure_future(
+            run_orchestrated_decision(full_context, settings)
+        )
+        while not _task.done():
+            await asyncio.sleep(8)
+            if not _task.done():
+                yield ": keep-alive\n\n"
+        result = await _task  # re-raises any exception
+
+        # Extract specialist outputs + decision fields from unified response
+        technical    = result.get("technical_analysis", {})
+        social_result = result.get("social_analysis", {})
+        risk         = result.get("risk_analysis", {})
+        decision     = result   # action, size_usd, leverage, etc. at top level
+
+        yield sse({"step": "technical_done",   "ticker": ticker, "result": technical})
+        yield sse({"step": "social_agent_done","ticker": ticker, "result": social_result})
+        yield sse({"step": "risk_done",        "ticker": ticker, "result": risk})
+        yield sse({"step": "decision_done",    "ticker": ticker, "result": decision})
 
         # ── 8. Log + Execute ─────────────────────────────────────────────────
         action = decision.get("action", "hold")
@@ -555,7 +573,10 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
                 action = "hold"
                 yield sse({"step": "guard", "ticker": ticker, "msg": "No open position — overriding to hold"})
 
-        size_usd_ui = decision.get("size_usd") or 0
+        # Short positions require minimum 2x leverage
+        if action == "short" and (decision.get("leverage") or 1) < 2:
+            decision["leverage"] = 2
+            yield sse({"step": "guard", "ticker": ticker, "msg": "Short requires min 2x leverage — forced to 2x"})
 
         agent_log_id = db.log_agent_run(
             ticker=ticker,
@@ -565,14 +586,16 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
             risk=risk,
             decision_reasoning=decision.get("reasoning", ""),
             decision_json=decision,
-            pair=ticker_row.get("pair"),
             trigger_flags="ui_trigger",
+            position_side=open_position.get("side") if open_position else "flat",
+            indicators_snapshot=all_indicators,
             executed=False,
         )
         trade_id = agent_log_id  # used below for position linking
         db.update_signal_state(ticker, decision, "ui_trigger")
 
-        if action != "hold" and current_price and decision.get("size_usd"):
+        # Exits (sell/cover) have size_usd=null by design — only entries need it
+        if action != "hold" and current_price and (action in ("sell", "cover") or decision.get("size_usd")):
             # Enforce the same hard limits as bot.py
             skip_reason = None
             if action in ("buy", "short"):
@@ -606,25 +629,11 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
                 exec_volume = exec_result.get("volume") or round(
                     (decision.get("size_usd") or 0) / (current_price or 1), 4
                 )
-                db.log_transaction(
-                    agent_log_id=agent_log_id,
-                    ticker=ticker,
-                    action=action,
-                    current_price=current_price or 0,
-                    volume=exec_volume,
-                    notional_usd=size_usd_ui,
-                    leverage=decision.get("leverage", 1),
-                    stop_loss=decision.get("stop_loss"),
-                    fee=0.0,
-                    pair=ticker_row.get("pair"),
-                    order_type="market",
-                    source_type="paper",
-                    is_simulated=exec_result.get("simulated", False),
-                    execution_result=exec_result,
-                )
-                db.mark_agent_run_executed(agent_log_id)
+                # Notional from actual filled volume — correct for both entries and exits
+                trade_notional = round(exec_volume * current_price, 2)
 
-                # Record position change (mirrors bot.py logic)
+                # Record position change + compute P&L before logging the trade
+                _realized_pnl = None
                 if action in ("buy", "short") and not exec_result.get("error"):
                     volume = exec_volume
                     await loop.run_in_executor(None, lambda: db.open_position(
@@ -637,7 +646,23 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
                         agent_log_id=agent_log_id,
                     ))
                 elif action in ("sell", "cover") and not exec_result.get("error"):
-                    await loop.run_in_executor(None, lambda: db.close_position(ticker, current_price, "ai_signal"))
+                    closed = await loop.run_in_executor(
+                        None, lambda: db.close_position(ticker, current_price, "ai_signal")
+                    )
+                    _realized_pnl = closed.get("realized_pnl") if closed else None
+
+                db.log_transaction(
+                    agent_log_id=agent_log_id,
+                    ticker=ticker,
+                    action=action,
+                    current_price=current_price or 0,
+                    volume=exec_volume,
+                    notional_usd=trade_notional,
+                    leverage=decision.get("leverage", 1),
+                    fee=db.calc_trade_fee(trade_notional),
+                    realized_pnl=_realized_pnl,
+                )
+                db.mark_agent_run_executed(agent_log_id)
 
                 yield sse({"step": "trade_done", "ticker": ticker, "result": exec_result})
         else:
@@ -653,9 +678,9 @@ async def _agent_stream(ticker: str) -> AsyncGenerator[str, None]:
 
 
 @app.get("/stream/agent/{ticker}")
-async def stream_agent(ticker: str):
+async def stream_agent(ticker: str, force: bool = False):
     return StreamingResponse(
-        _agent_stream(ticker),
+        _agent_stream(ticker, force=force),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -708,7 +733,7 @@ async def api_agent_history(page: int = 1):
 
 @app.get("/api/agent-log/{agent_log_id}")
 async def api_agent_detail(agent_log_id: int):
-    """Return full detail for a single agent_log row plus linked transaction_ledger records."""
+    """Return full detail for a single agent_log row plus linked trades."""
     loop = asyncio.get_running_loop()
     row = await loop.run_in_executor(None, lambda: db.get_agent_run_by_id(agent_log_id))
     if not row:

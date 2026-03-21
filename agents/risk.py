@@ -33,8 +33,8 @@ Your job:
    - Tighter stops for high-leverage trades
    - Default to {stop_loss_pct_default}% if ATR is unavailable
 3. Recommend a leverage level — MUST NOT exceed max_leverage ({max_leverage}x)
-   - Only recommend >1x if volatility is manageable and stop-loss is tight
-   - Max {max_leverage}x on xStocks (Kraken limit)
+   - Short positions REQUIRE a minimum of 2x leverage (borrowing is mandatory to sell short)
+   - Only recommend >2x for shorts, or >1x for longs, if volatility is manageable and stop-loss is tight
 4. Flag any concentration risk or overexposure issues
 
 You do NOT see: X posts, chart patterns, RSI, MACD, or directional signals.
