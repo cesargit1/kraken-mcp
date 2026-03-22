@@ -382,8 +382,28 @@ const STAGE_LABELS = {
   starting: 'Starting\u2026',
 };
 
+const SUB_AGENT_LABELS = {
+  technical: 'Technical',
+  social: 'Social',
+  risk: 'Risk',
+};
+
 function _stageLabel(stage) {
   return STAGE_LABELS[stage] || stage || '—';
+}
+
+function _subAgentPills(subAgents) {
+  if (!subAgents || typeof subAgents !== 'object') return '';
+  const names = Object.keys(subAgents);
+  if (!names.length) return '';
+  return '<span class="ml-1 inline-flex gap-1">' + names.map(n => {
+    const st = subAgents[n];
+    const label = SUB_AGENT_LABELS[n] || n;
+    if (st === 'done') {
+      return `<span class="text-[10px] font-medium text-green-400 bg-green-400/10 rounded px-1 py-0.5 ring-1 ring-inset ring-green-400/20">${esc(label)} ✓</span>`;
+    }
+    return `<span class="text-[10px] font-medium text-yellow-400 bg-yellow-400/10 rounded px-1 py-0.5 ring-1 ring-inset ring-yellow-400/20 animate-pulse">${esc(label)} …</span>`;
+  }).join('') + '</span>';
 }
 
 function _renderActiveRuns(botTickers, uiRuns) {
@@ -396,14 +416,14 @@ function _renderActiveRuns(botTickers, uiRuns) {
   // Bot-loop tickers that are actually running
   (botTickers || []).forEach(t => {
     if (t.status === 'running') {
-      lines.push({ ticker: t.ticker, stage: t.stage, source: 'bot' });
+      lines.push({ ticker: t.ticker, stage: t.stage, source: 'bot', sub_agents: t.sub_agents });
     }
   });
 
   // UI-triggered runs
   Object.values(uiRuns).forEach(r => {
     if (r.status === 'running') {
-      lines.push({ ticker: r.ticker, stage: r.stage, source: 'ui' });
+      lines.push({ ticker: r.ticker, stage: r.stage, source: 'ui', sub_agents: r.sub_agents });
     }
   });
 
@@ -416,10 +436,12 @@ function _renderActiveRuns(botTickers, uiRuns) {
     const badge = l.source === 'ui'
       ? '<span class="ml-2 text-[10px] font-medium text-indigo-400 bg-indigo-400/10 rounded px-1.5 py-0.5 ring-1 ring-inset ring-indigo-400/20">manual</span>'
       : '<span class="ml-2 text-[10px] font-medium text-cyan-400 bg-cyan-400/10 rounded px-1.5 py-0.5 ring-1 ring-inset ring-cyan-400/20">bot</span>';
-    return `<li class="flex items-center gap-3 text-sm">
+    const pills = (l.stage === 'specialists') ? _subAgentPills(l.sub_agents) : '';
+    return `<li class="flex items-center gap-3 text-sm flex-wrap">
       <span class="spinner"></span>
       <strong class="font-mono text-white">${esc(l.ticker)}</strong>
       <span class="text-gray-400">${esc(_stageLabel(l.stage))}</span>
+      ${pills}
       ${badge}
     </li>`;
   }).join('') + '</ul>';
@@ -1106,10 +1128,10 @@ function runAgent(ticker, force = false) {
   const STEPS = [
     { key: 'candles',    label: 'Fetching candles' },
     { key: 'indicators', label: 'Computing indicators' },
-    { key: 'x_search',   label: 'Fetching X posts' },
     { key: 'technical',  label: 'Technical analyst' },
     { key: 'social',     label: 'Social analyst' },
     { key: 'risk',       label: 'Risk analyst' },
+    { key: 'decision',   label: 'Decision agent' },
     { key: 'trade',      label: 'Trade execution' },
   ];
 
@@ -1158,14 +1180,15 @@ function runAgent(ticker, force = false) {
   const stepMap = {
     candles_start: 'candles', candles_done: 'candles',
     indicators_start: 'indicators', indicators_done: 'indicators',
-    technical_done: 'technical',
-    social_agent_done: 'social',
-    risk_done: 'risk',
+    technical_start: 'technical', technical_done: 'technical',
+    social_start: 'social', social_done: 'social',
+    risk_start: 'risk', risk_done: 'risk',
+    decision_start: 'decision', decision_done: 'decision',
     trade_start: 'trade', trade_done: 'trade', trade_skipped: 'trade',
   };
   const doneEvents = new Set([
     'candles_done','indicators_done',
-    'technical_done','social_agent_done','risk_done',
+    'technical_done','social_done','risk_done',
     'decision_done','trade_done','trade_skipped',
   ]);
 
@@ -1187,13 +1210,13 @@ function runAgent(ticker, force = false) {
         if (_uiRuns[_uiRunId]) { _uiRuns[_uiRunId].stage = key; refreshActiveRuns(); }
       }
 
-      // When specialists start, all four run in parallel (social_analyst calls x_search internally)
+      // When specialists_start fires, mark all three as active (they run in parallel)
       if (step === 'specialists_start') {
-        state['x_search'] = 'active';
         state['technical'] = 'active';
         state['social'] = 'active';
         state['risk'] = 'active';
         renderSteps();
+        if (_uiRuns[_uiRunId]) { _uiRuns[_uiRunId].stage = 'specialists'; refreshActiveRuns(); }
       }
 
       // Show decision result inline

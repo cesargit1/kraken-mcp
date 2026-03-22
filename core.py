@@ -149,11 +149,15 @@ async def run_analyst_async(system_prompt: str, context: dict, model: str = MODE
 # Multi-agent orchestrated decision (grok-4.20-multi-agent-0309)
 # ---------------------------------------------------------------------------
 
-async def run_orchestrated_decision(context: dict, settings: dict) -> dict:
+async def run_orchestrated_decision(context: dict, settings: dict, on_progress=None) -> dict:
     """
     Manually orchestrated pipeline:
       1. technical_analyst, social_analyst, risk_manager run in parallel
       2. decision agent synthesises all three outputs into a final trade decision
+
+    on_progress: optional async callback(stage: str, data: dict) called at each
+                 sub-agent transition so callers (bot loop, UI SSE) can show
+                 granular progress.
 
     context keys (combined payload):
       ticker           - str
@@ -177,6 +181,10 @@ async def run_orchestrated_decision(context: dict, settings: dict) -> dict:
     from agents.social    import analyze as social_analyze
     from agents.risk      import analyze as risk_analyze
     from agents.decision  import analyze as decision_analyze
+
+    async def _emit(stage, data=None):
+        if on_progress:
+            await on_progress(stage, data or {})
 
     ticker = context["ticker"]
 
@@ -206,13 +214,23 @@ async def run_orchestrated_decision(context: dict, settings: dict) -> dict:
     }
 
     # ── Step 1: run all three specialists in parallel ──────────────────────
+    await _emit("specialists_start")
+
+    async def _run_specialist(name, coro):
+        await _emit(f"{name}_start")
+        result = await coro
+        await _emit(f"{name}_done", {"result": result})
+        return result
+
     technical, social, risk = await asyncio.gather(
-        technical_analyze(technical_context),
-        social_analyze(social_context),
-        risk_analyze(risk_context),
+        _run_specialist("technical", technical_analyze(technical_context)),
+        _run_specialist("social",    social_analyze(social_context)),
+        _run_specialist("risk",      risk_analyze(risk_context)),
     )
 
     # ── Step 2: decision agent synthesises ────────────────────────────────
+    await _emit("decision_start")
+
     decision_context = {
         "ticker":             ticker,
         "current_price":      context.get("current_price"),
@@ -225,6 +243,7 @@ async def run_orchestrated_decision(context: dict, settings: dict) -> dict:
     }
 
     decision = await decision_analyze(decision_context)
+    await _emit("decision_done", {"result": decision})
 
     return {
         **decision,

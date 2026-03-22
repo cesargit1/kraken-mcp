@@ -264,8 +264,27 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
     }
 
     print(f"  [AI]  Launching multi-agent analysis (technical / social / risk)...")
-    update_ticker_state(ticker, stage="analysis")
-    result = await run_orchestrated_decision(full_context, settings)
+    update_ticker_state(ticker, stage="specialists")
+
+    # Progress callback — updates dashboard state as each sub-agent starts/finishes
+    _specialist_status = {}  # tracks which specialists are done
+    async def _on_progress(stage, data):
+        if stage == "specialists_start":
+            update_ticker_state(ticker, stage="specialists", sub_agents={})
+        elif stage.endswith("_start") and stage != "decision_start":
+            name = stage.removesuffix("_start")
+            _specialist_status[name] = "running"
+            update_ticker_state(ticker, stage="specialists", sub_agents=dict(_specialist_status))
+        elif stage.endswith("_done") and stage != "decision_done":
+            name = stage.removesuffix("_done")
+            _specialist_status[name] = "done"
+            update_ticker_state(ticker, stage="specialists", sub_agents=dict(_specialist_status))
+        elif stage == "decision_start":
+            update_ticker_state(ticker, stage="decision")
+        elif stage == "decision_done":
+            update_ticker_state(ticker, stage="execution")
+
+    result = await run_orchestrated_decision(full_context, settings, on_progress=_on_progress)
 
     # Extract specialist outputs + decision fields from unified response
     technical = result.get("technical_analysis", {})

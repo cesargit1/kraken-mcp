@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -486,8 +487,7 @@ async def _agent_stream(ticker: str, force: bool = False) -> AsyncGenerator[str,
             "drawdown_pct":        _drawdown,
         }
 
-        # ── 5. Multi-agent orchestration: technical + social(x_search) + risk in parallel ──
-        yield sse({"step": "specialists_start", "ticker": ticker})
+        # ── 5. Multi-agent orchestration with live progress ──────────────
 
         # Enrich open_position with P&L for the decision maker
         open_position_raw = await loop.run_in_executor(None, lambda: db.get_open_position(ticker))
@@ -521,14 +521,13 @@ async def _agent_stream(ticker: str, force: bool = False) -> AsyncGenerator[str,
             }
         open_position = open_position_raw
 
-        # Build unified context — orchestrator dispatches all 3 sub-agents in parallel;
-        # social_analyst calls x_search internally (not pre-fetched here)
+        # Build unified context for the orchestrator
         full_context = {
             "ticker":            ticker,
             "current_price":     current_price,
             "indicators":        all_indicators,
             "flags":             flags,
-            "x_search_query":    build_x_query(ticker_row),  # social_analyst calls x_search
+            "x_search_query":    build_x_query(ticker_row),
             "obv":               {tf: v.get("obv") for tf, v in all_indicators.items()},
             "atr":               {tf: v.get("atr") for tf, v in all_indicators.items()},
             "portfolio_summary": portfolio_summary,
@@ -536,25 +535,45 @@ async def _agent_stream(ticker: str, force: bool = False) -> AsyncGenerator[str,
             "decision_history":  decision_history,
         }
 
+        yield sse({"step": "specialists_start", "ticker": ticker})
+
+        # Async queue bridges the on_progress callback → SSE generator
+        _progress_q: asyncio.Queue = asyncio.Queue()
+
+        async def _on_ui_progress(stage, data):
+            await _progress_q.put((stage, data))
+
         _task = asyncio.ensure_future(
-            run_orchestrated_decision(full_context, settings)
+            run_orchestrated_decision(full_context, settings, on_progress=_on_ui_progress)
         )
+
+        # Drain progress events + keep-alive until the task finishes
         while not _task.done():
-            await asyncio.sleep(8)
-            if not _task.done():
+            try:
+                stage, data = await asyncio.wait_for(_progress_q.get(), timeout=8)
+                step_name = stage  # e.g. "technical_start", "social_done", "decision_start"
+                evt: dict = {"step": step_name, "ticker": ticker}
+                if "result" in data:
+                    evt["result"] = data["result"]
+                yield sse(evt)
+            except asyncio.TimeoutError:
                 yield ": keep-alive\n\n"
+
         result = await _task  # re-raises any exception
+
+        # Drain any remaining queued events
+        while not _progress_q.empty():
+            stage, data = _progress_q.get_nowait()
+            evt = {"step": stage, "ticker": ticker}
+            if "result" in data:
+                evt["result"] = data["result"]
+            yield sse(evt)
 
         # Extract specialist outputs + decision fields from unified response
         technical    = result.get("technical_analysis", {})
         social_result = result.get("social_analysis", {})
         risk         = result.get("risk_analysis", {})
         decision     = result   # action, size_usd, leverage, etc. at top level
-
-        yield sse({"step": "technical_done",   "ticker": ticker, "result": technical})
-        yield sse({"step": "social_agent_done","ticker": ticker, "result": social_result})
-        yield sse({"step": "risk_done",        "ticker": ticker, "result": risk})
-        yield sse({"step": "decision_done",    "ticker": ticker, "result": decision})
 
         # ── 8. Log + Execute ─────────────────────────────────────────────────
         action = decision.get("action", "hold")
