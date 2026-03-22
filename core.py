@@ -110,21 +110,19 @@ def run_analyst(system_prompt: str, context: dict, model: str = MODEL) -> dict:
     """
     Single structured LLM call for a specialist analyst.
     Returns parsed JSON dict. No tool calls — context is pre-built.
+    Uses the Responses API (required by multi-agent models).
     Retries on API errors and JSON parse failures.
     """
     def _call():
-        response = _get_client().chat.completions.create(
+        response = _get_client().responses.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": json.dumps(context, indent=2)},
-            ],
+            instructions=system_prompt,
+            input=json.dumps(context, indent=2),
         )
-        content = response.choices[0].message.content
+        content = response.output_text
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            import re
             m = re.search(r'\{[\s\S]*\}', content)
             if m:
                 try:
