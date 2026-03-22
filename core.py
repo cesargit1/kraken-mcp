@@ -48,8 +48,7 @@ def build_x_query(ticker_row: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _client: OpenAI | None = None
-MODEL = "grok-4.20-multi-agent-0309"
-# Multi-agent orchestration can take longer than a single x_search call
+MODEL = "grok-4.20-0309-reasoning"
 _REQUEST_TIMEOUT = 300.0  # seconds — applies to all Responses API calls
 
 
@@ -213,7 +212,9 @@ async def run_orchestrated_decision(context: dict, settings: dict, on_progress=N
         "settings":          settings,
     }
 
-    # ── Step 1: run all three specialists in parallel ──────────────────────
+    # ── Step 1: run specialists in parallel ────────────────────────────────
+    # Skip risk agent when a position is already open — sell/cover/hold
+    # decisions don't need position sizing; saves an LLM call.
     await _emit("specialists_start")
 
     async def _run_specialist(name, coro):
@@ -222,11 +223,20 @@ async def run_orchestrated_decision(context: dict, settings: dict, on_progress=N
         await _emit(f"{name}_done", {"result": result})
         return result
 
-    technical, social, risk = await asyncio.gather(
-        _run_specialist("technical", technical_analyze(technical_context)),
-        _run_specialist("social",    social_analyze(social_context)),
-        _run_specialist("risk",      risk_analyze(risk_context)),
-    )
+    has_open_position = context.get("open_position") is not None
+
+    if has_open_position:
+        technical, social = await asyncio.gather(
+            _run_specialist("technical", technical_analyze(technical_context)),
+            _run_specialist("social",    social_analyze(social_context)),
+        )
+        risk = {"skipped": True, "reasoning": "Position already open — no sizing needed"}
+    else:
+        technical, social, risk = await asyncio.gather(
+            _run_specialist("technical", technical_analyze(technical_context)),
+            _run_specialist("social",    social_analyze(social_context)),
+            _run_specialist("risk",      risk_analyze(risk_context)),
+        )
 
     # ── Step 2: decision agent synthesises ────────────────────────────────
     await _emit("decision_start")
