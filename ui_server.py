@@ -435,17 +435,21 @@ async def _agent_stream(ticker: str, force: bool = False) -> AsyncGenerator[str,
 
         # ── Flag + timer gate ──────────────────────────────────────────────
         if not force:
-            last_ai = await loop.run_in_executor(None, lambda: db.get_last_ai_run(ticker))
+            last_ai, active_flags = await asyncio.gather(
+                loop.run_in_executor(None, lambda: db.get_last_ai_run(ticker)),
+                loop.run_in_executor(None, lambda: db.get_unsandboxed_flags(ticker, flags)),
+            )
             ai_timer_min = (await loop.run_in_executor(None, db.get_settings)).get("ai_timer_min", 60)
             timer_expired = (
                 last_ai is None
                 or (datetime.now(timezone.utc) - last_ai).total_seconds() >= ai_timer_min * 60
             )
-            if not flags and not timer_expired:
+            if not active_flags and not timer_expired:
                 yield sse({"step": "no_trigger", "ticker": ticker,
                            "msg": f"No flags triggered and timer not yet due — skipping orchestrator"})
                 yield sse({"step": "complete", "ticker": ticker})
                 return
+            flags = active_flags
         # ── 3. Current price ─────────────────────────────────────────────────
         current_price = await loop.run_in_executor(
             None, lambda: bot.get_current_price(ticker)

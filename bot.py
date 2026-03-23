@@ -492,17 +492,16 @@ async def _process_one_ticker(ticker_row: dict) -> None:
         flags = ind.any_flags(all_indicators)
         update_ticker_state(ticker, stage="flag_check", flags=flags, current_price=current_price)
 
-        # 7. Fetch last AI run + cooldown state
-        last_ai, on_cooldown = await asyncio.gather(
+        # 7. Fetch last AI run + per-flag cooldown state
+        last_ai, active_flags = await asyncio.gather(
             loop.run_in_executor(None, lambda: db.get_last_ai_run(ticker)),
-            loop.run_in_executor(None, lambda: db.check_cooldown(ticker)),
+            loop.run_in_executor(None, lambda: db.get_unsandboxed_flags(ticker, flags)),
         )
 
         timer_expired = (
             last_ai is None
             or (datetime.now(timezone.utc) - last_ai).total_seconds() >= AI_TIMER_MIN * 60
         )
-        active_flags = [] if on_cooldown else flags
 
         # 8. Trigger AI if there are new flags or timer expired
         if active_flags or timer_expired:

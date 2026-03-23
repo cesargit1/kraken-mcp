@@ -192,6 +192,33 @@ def check_cooldown(ticker: str) -> bool:
     return datetime.now(timezone.utc) < cu
 
 
+def get_unsandboxed_flags(ticker: str, flags: list[str]) -> list[str]:
+    """Return only flags that are not currently sandboxed for this ticker."""
+    if not flags:
+        return []
+
+    state = get_signal_state(ticker)
+    if not state or not state.get("cooldown_until"):
+        return flags
+
+    cu = datetime.fromisoformat(state["cooldown_until"].replace("Z", "+00:00"))
+    if cu.tzinfo is None:
+        cu = cu.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) >= cu:
+        return flags
+
+    last_event_type = state.get("last_event_type") or ""
+    sandboxed = {
+        flag.strip()
+        for flag in last_event_type.split(",")
+        if flag.strip() and flag.strip() not in {"timer", "ui_trigger", "stop_loss"}
+    }
+    if not sandboxed:
+        return flags
+
+    return [flag for flag in flags if flag not in sandboxed]
+
+
 def set_cooldown(ticker: str, window_minutes: int = 30) -> None:
     """Set cooldown_until on signal_state for this ticker."""
     from datetime import timedelta
