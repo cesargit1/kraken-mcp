@@ -459,12 +459,21 @@ async def _agent_stream(ticker: str, force: bool = False) -> AsyncGenerator[str,
         _open_pos   = await loop.run_in_executor(None, db.get_all_open_positions)
         _realized   = await loop.run_in_executor(None, db.get_realized_pnl)
         _paper_cap  = settings["paper_capital"]
+        # Fetch current prices for all open positions for accurate unrealized P&L
+        _price_map = {ticker: current_price} if current_price else {}
+        _other_tickers = list({p["ticker"] for p in _open_pos if p["ticker"] != ticker})
+        if _other_tickers:
+            _other_prices = await asyncio.gather(
+                *(loop.run_in_executor(None, lambda t=t: bot.get_current_price(t)) for t in _other_tickers)
+            )
+            for _t, _p in zip(_other_tickers, _other_prices):
+                if _p:
+                    _price_map[_t] = _p
         portfolio_summary = db.build_portfolio_summary(
             paper_capital=_paper_cap,
             all_open_positions=_open_pos,
             realized_pnl=_realized,
-            current_ticker=ticker,
-            current_price=current_price,
+            price_map=_price_map,
         )
 
         # ── 5. Multi-agent orchestration with live progress ──────────────

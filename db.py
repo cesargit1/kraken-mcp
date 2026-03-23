@@ -733,14 +733,21 @@ def build_portfolio_summary(
     paper_capital: float,
     all_open_positions: list[dict],
     realized_pnl: float,
+    price_map: dict[str, float] | None = None,
     current_ticker: str | None = None,
     current_price: float | None = None,
 ) -> dict:
     """Compute a portfolio summary dict used by the AI pipeline and dashboard.
 
-    current_ticker / current_price: when provided, the unrealized P&L for that
-    ticker uses the live price instead of entry_price (which would contribute 0).
+    price_map: {ticker: current_price} for all open positions. Used to compute
+    accurate unrealized P&L across the full portfolio.
+    Falls back to current_ticker/current_price for backward compat.
     """
+    # Build effective price lookup
+    _prices = dict(price_map) if price_map else {}
+    if current_ticker and current_price and current_ticker not in _prices:
+        _prices[current_ticker] = current_price
+
     used_margin = sum(
         ((p.get("entry_price") or 0) * (p.get("quantity") or 0)) / max(p.get("leverage") or 1, 1)
         for p in all_open_positions
@@ -755,7 +762,7 @@ def build_portfolio_summary(
         side = p.get("side", "long")
         if not ep:
             continue
-        cp = current_price if (current_ticker and p.get("ticker") == current_ticker) else ep
+        cp = _prices.get(p.get("ticker"), ep)
         raw = ((cp - ep) * qty * lev) if side == "long" else ((ep - cp) * qty * lev)
         accrued = calc_margin_cost(ep * qty, lev, p.get("opened_at"))
         unrealized_pnl += raw - accrued

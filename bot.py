@@ -136,36 +136,6 @@ async def execute_trade(ticker_row: dict, decision: dict, current_price: float) 
     if volume <= 0:
         return {"error": "zero volume computed"}
 
-    # Hard guards: block entries that violate position/size/leverage/cash limits
-    if action in ("buy", "short"):
-        settings = db.get_settings()
-        paper_capital = settings.get("paper_capital", 1000.0)
-        all_open = db.get_all_open_positions()
-
-        # Guard: clamp size_usd to operator limits
-        max_pct_usd  = paper_capital * settings.get("max_position_pct", 20) / 100
-        max_hard_usd = settings.get("max_position_usd") or max_pct_usd
-        size_cap     = min(max_pct_usd, max_hard_usd)
-        if size_usd > size_cap:
-            size_usd = round(size_cap, 2)
-            volume = round(size_usd / current_price, 4) if current_price else 0
-
-        # Guard: clamp leverage to operator limit
-        max_lev = settings.get("max_leverage", 3)
-        if leverage > max_lev:
-            leverage = max_lev
-
-        # Guard: insufficient cash
-        used_margin = sum(
-            ((p.get("entry_price") or 0) * (p.get("quantity") or 0)) / max(p.get("leverage") or 1, 1)
-            for p in all_open
-        )
-        realized = db.get_realized_pnl()
-        available_cash = paper_capital - used_margin + realized
-        required_margin = size_usd / max(leverage, 1)
-        if required_margin > available_cash:
-            return {"error": f"insufficient cash — need ${required_margin:,.0f}, have ${available_cash:,.0f}"}
-
     result = {
         "simulated": True,
         "action":    action,
@@ -220,13 +190,24 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
     realized_pnl       = fetch_map["realized_pnl"]
 
     # Build portfolio summary for decision + risk agents
+    # Fetch current prices for ALL open positions so unrealized P&L is accurate
     paper_capital = settings.get("paper_capital", 1000.0)
+    price_map = {}
+    if current_price:
+        price_map[ticker] = current_price
+    other_tickers = list({p["ticker"] for p in all_open_positions if p["ticker"] != ticker})
+    if other_tickers:
+        other_prices = await asyncio.gather(
+            *(loop.run_in_executor(None, lambda t=t: get_current_price(t)) for t in other_tickers)
+        )
+        for t, p in zip(other_tickers, other_prices):
+            if p:
+                price_map[t] = p
     portfolio_summary = db.build_portfolio_summary(
         paper_capital=paper_capital,
         all_open_positions=all_open_positions,
         realized_pnl=realized_pnl,
-        current_ticker=ticker,
-        current_price=current_price,
+        price_map=price_map,
     )
 
     # Enrich open_position with P&L + time-in-trade before passing to orchestrator
@@ -297,27 +278,6 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
     )
 
     action = decision.get("action", "hold")
-
-    # Hard guard: enforce position state rules regardless of what the AI returned.
-    # Prevents stacking duplicate entries if the AI ignores its prompt rules.
-    if open_position:
-        side = open_position.get("side")
-        if side == "short" and action not in ("hold", "cover"):
-            print(f"  [GUARD] {ticker}: already short — overriding AI action '{action}' → hold")
-            action = "hold"
-        elif side == "long" and action not in ("hold", "sell"):
-            print(f"  [GUARD] {ticker}: already long — overriding AI action '{action}' → hold")
-            action = "hold"
-    else:
-        # Flat — block exit actions that make no sense without a position
-        if action in ("sell", "cover"):
-            print(f"  [GUARD] {ticker}: no open position — overriding AI action '{action}' → hold")
-            action = "hold"
-
-    # Guard: short positions require minimum 2x leverage (borrowing is mandatory)
-    if action == "short" and (decision.get("leverage") or 1) < 2:
-        decision["leverage"] = 2
-        print(f"  [GUARD] {ticker}: short requires min 2x leverage — forced to 2x")
 
     print(f"  [AI ◀] {ticker} → {action.upper()} (confidence={decision.get('confidence','?')}%)")
     print(f"         {decision.get('reasoning','')[:140]}")
@@ -518,6 +478,9 @@ async def _process_one_ticker(ticker_row: dict) -> None:
                 if breached:
                     update_ticker_state(ticker, stage="stop_loss", current_price=current_price)
                     await close_position_stop_loss(ticker_row, open_pos, current_price)
+                    db.set_cooldown(ticker, COOLDOWN_MIN)
+                    update_ticker_state(ticker, status="done", stage="complete", last_action="stop_loss")
+                    return  # Don't let AI re-enter in the same cycle that triggered stop-loss
 
         # 5. Market hours gate — skip AI for stocks when exchange is closed
         if not is_market_open(asset_class):
