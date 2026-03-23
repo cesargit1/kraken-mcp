@@ -156,7 +156,7 @@ def get_last_ai_run(ticker: str) -> Optional[datetime]:
 # Cooldown (stored in signal_state.cooldown_until)
 # ---------------------------------------------------------------------------
 
-def check_cooldown(ticker: str, event_type: str, window_minutes: int = 30) -> bool:
+def check_cooldown(ticker: str) -> bool:
     """Return True if ticker is within its cooldown window (should skip)."""
     state = get_signal_state(ticker)
     if not state or not state.get("cooldown_until"):
@@ -167,7 +167,7 @@ def check_cooldown(ticker: str, event_type: str, window_minutes: int = 30) -> bo
     return datetime.now(timezone.utc) < cu
 
 
-def set_cooldown(ticker: str, event_type: str, window_minutes: int = 30) -> None:
+def set_cooldown(ticker: str, window_minutes: int = 30) -> None:
     """Set cooldown_until on signal_state for this ticker."""
     from datetime import timedelta
     until = (datetime.now(timezone.utc) + timedelta(minutes=window_minutes)).isoformat()
@@ -596,6 +596,10 @@ def get_closed_positions_full(limit: int = 50) -> list[dict]:
     for b in buy_rows:
         buys_by_ticker[b["ticker"]].append(b)
 
+    # Track which buy ids have already been claimed by a sell so no two
+    # orphan sells share the same entry (prevents double-counting P&L).
+    _claimed_buy_ids: set = set()
+
     # 5. Synthesize a positions-like dict for each orphan sell
     synthetic = []
     for sell in orphans:
@@ -608,13 +612,17 @@ def get_closed_positions_full(limit: int = 50) -> list[dict]:
         quantity    = float(sell_tx.get("quantity") or 0) or None
 
         # Find the last executed buy that occurred before this sell
+        # and hasn't already been claimed by another orphan sell.
         entry_price = None
         opened_at   = None
         for buy in buys_by_ticker.get(ticker, []):
+            if buy["id"] in _claimed_buy_ids:
+                continue
             if (buy.get("ts") or "") < (close_ts or ""):
                 buy_tx      = buy_tx_by_id.get(buy["id"], {})
                 entry_price = float(buy_tx.get("price") or 0) or None
                 opened_at   = buy.get("ts")
+                _claimed_buy_ids.add(buy["id"])
                 break
 
         pnl = None
@@ -690,6 +698,80 @@ def get_settings() -> dict:
     except Exception:
         pass
     return dict(_DEFAULT_SETTINGS)
+
+
+def enrich_position(position: dict, current_price: float) -> dict:
+    """Add unrealized P&L and time-in-trade fields to an open position dict."""
+    ep   = position.get("entry_price") or 0
+    side = position.get("side", "long")
+    qty  = position.get("quantity") or 0
+    lev  = position.get("leverage") or 1
+    raw_usd        = ((current_price - ep) * qty * lev) if side == "long" else ((ep - current_price) * qty * lev)
+    accrued_margin = calc_margin_cost(ep * qty, lev, position.get("opened_at"))
+    net_usd        = round(raw_usd - accrued_margin, 2)
+    margin_capital = ep * qty
+    signed_pct     = round(net_usd / margin_capital * 100, 2) if margin_capital else 0.0
+    opened_at_str  = position.get("opened_at")
+    hrs_open       = None
+    if opened_at_str:
+        try:
+            opened_dt = datetime.fromisoformat(opened_at_str.replace("Z", "+00:00"))
+            if opened_dt.tzinfo is None:
+                opened_dt = opened_dt.replace(tzinfo=timezone.utc)
+            hrs_open = round((datetime.now(timezone.utc) - opened_dt).total_seconds() / 3600, 1)
+        except Exception:
+            pass
+    return {
+        **position,
+        "unrealized_pnl_pct": signed_pct,
+        "unrealized_pnl_usd": net_usd,
+        "time_in_trade_hrs":  hrs_open,
+    }
+
+
+def build_portfolio_summary(
+    paper_capital: float,
+    all_open_positions: list[dict],
+    realized_pnl: float,
+    current_ticker: str | None = None,
+    current_price: float | None = None,
+) -> dict:
+    """Compute a portfolio summary dict used by the AI pipeline and dashboard.
+
+    current_ticker / current_price: when provided, the unrealized P&L for that
+    ticker uses the live price instead of entry_price (which would contribute 0).
+    """
+    used_margin = sum(
+        ((p.get("entry_price") or 0) * (p.get("quantity") or 0)) / max(p.get("leverage") or 1, 1)
+        for p in all_open_positions
+    )
+    available_cash = paper_capital - used_margin + realized_pnl
+
+    unrealized_pnl = 0.0
+    for p in all_open_positions:
+        ep  = p.get("entry_price") or 0
+        qty = p.get("quantity") or 0
+        lev = p.get("leverage") or 1
+        side = p.get("side", "long")
+        if not ep:
+            continue
+        cp = current_price if (current_ticker and p.get("ticker") == current_ticker) else ep
+        raw = ((cp - ep) * qty * lev) if side == "long" else ((ep - cp) * qty * lev)
+        accrued = calc_margin_cost(ep * qty, lev, p.get("opened_at"))
+        unrealized_pnl += raw - accrued
+
+    account_equity = paper_capital + realized_pnl + unrealized_pnl
+    drawdown_pct = round((account_equity - paper_capital) / paper_capital * 100, 2) if paper_capital else 0.0
+
+    return {
+        "starting_capital":    paper_capital,
+        "realized_pnl":        round(realized_pnl, 2),
+        "unrealized_pnl":      round(unrealized_pnl, 2),
+        "account_equity":      round(account_equity, 2),
+        "open_position_count": len(all_open_positions),
+        "available_cash":      round(available_cash, 2),
+        "drawdown_pct":        drawdown_pct,
+    }
 
 
 def update_settings(updates: dict) -> dict:

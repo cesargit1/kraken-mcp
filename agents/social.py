@@ -60,7 +60,7 @@ async def analyze(context: dict) -> dict:
         # Query string provided — call search_x directly
         ticker = context["ticker"]
         query  = context["x_search_query"]
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         print(f"  [social] Searching X for {ticker}...")
         x_posts = await loop.run_in_executor(None, lambda: search_x(query))
         print(f"  [social] X posts received for {ticker} ({len(x_posts)} chars)")
@@ -72,7 +72,7 @@ async def analyze(context: dict) -> dict:
     else:
         # Bot flow: full ticker_row provided, build query from it
         ticker_row = context["ticker_row"]
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         x_query = build_x_query(ticker_row)
         ticker = ticker_row["ticker"]
         print(f"  [social] Searching X for {ticker}...")

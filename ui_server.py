@@ -459,33 +459,13 @@ async def _agent_stream(ticker: str, force: bool = False) -> AsyncGenerator[str,
         _open_pos   = await loop.run_in_executor(None, db.get_all_open_positions)
         _realized   = await loop.run_in_executor(None, db.get_realized_pnl)
         _paper_cap  = settings["paper_capital"]
-        _total_cost = sum(
-            ((p.get("entry_price") or 0) * (p.get("quantity") or 0)) / max(p.get("leverage") or 1, 1)
-            for p in _open_pos
+        portfolio_summary = db.build_portfolio_summary(
+            paper_capital=_paper_cap,
+            all_open_positions=_open_pos,
+            realized_pnl=_realized,
+            current_ticker=ticker,
+            current_price=current_price,
         )
-        _unreal_pnl = 0.0
-        for _p in _open_pos:
-            _ep  = _p.get("entry_price") or 0
-            _qty = _p.get("quantity") or 0
-            _lev = _p.get("leverage") or 1
-            _s   = _p.get("side", "long")
-            if _ep and _qty:
-                # Use current_price for the active ticker; entry price (→ 0 contribution) for others
-                _cp  = current_price if _p.get("ticker") == ticker else _ep
-                _raw = (_cp - _ep) * _qty * _lev if _s == "long" else (_ep - _cp) * _qty * _lev
-                _unreal_pnl += _raw - db.calc_margin_cost(_ep * _qty, _lev, _p.get("opened_at"))
-        _equity     = round(_paper_cap + _realized + _unreal_pnl, 2)
-        _avail_cash = round(_paper_cap - _total_cost + _realized, 2)
-        _drawdown   = round(((_equity - _paper_cap) / _paper_cap) * 100, 2) if _paper_cap else 0.0
-        portfolio_summary = {
-            "starting_capital":    _paper_cap,
-            "realized_pnl":        round(_realized, 2),
-            "unrealized_pnl":      round(_unreal_pnl, 2),
-            "account_equity":      _equity,
-            "open_position_count": len(_open_pos),
-            "available_cash":      _avail_cash,
-            "drawdown_pct":        _drawdown,
-        }
 
         # ── 5. Multi-agent orchestration with live progress ──────────────
 
@@ -494,31 +474,7 @@ async def _agent_stream(ticker: str, force: bool = False) -> AsyncGenerator[str,
         decision_history  = await loop.run_in_executor(None, lambda: db.get_ticker_decision_history(ticker, limit=5))
         enriched_position = None
         if open_position_raw and current_price:
-            _ep  = open_position_raw.get("entry_price") or 0
-            _sid = open_position_raw.get("side", "long")
-            _qty = open_position_raw.get("quantity") or 0
-            _lev = open_position_raw.get("leverage") or 1
-            _raw_usd = (current_price - _ep) * _qty * _lev if _sid == "long" else (_ep - current_price) * _qty * _lev
-            _accrued = db.calc_margin_cost(_ep * _qty, _lev, open_position_raw.get("opened_at"))
-            _net_usd = round(_raw_usd - _accrued, 2)
-            _margin_cap = _ep * _qty
-            _signed_pct = round(_net_usd / _margin_cap * 100, 2) if _margin_cap else 0.0
-            _opened_at_str = open_position_raw.get("opened_at")
-            _hrs_open = None
-            if _opened_at_str:
-                try:
-                    from datetime import timezone as _tz2
-                    from datetime import datetime as _dt2
-                    _opened_dt = _dt2.fromisoformat(_opened_at_str.replace("Z", "+00:00"))
-                    _hrs_open  = round((_dt2.now(_tz2.utc) - _opened_dt).total_seconds() / 3600, 1)
-                except Exception:
-                    pass
-            enriched_position = {
-                **open_position_raw,
-                "unrealized_pnl_pct": _signed_pct,
-                "unrealized_pnl_usd": _net_usd,
-                "time_in_trade_hrs":  _hrs_open,
-            }
+            enriched_position = db.enrich_position(open_position_raw, current_price)
         open_position = open_position_raw
 
         # Build unified context for the orchestrator

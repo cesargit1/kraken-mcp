@@ -1,16 +1,16 @@
 """
 bot.py — Main async trading loop (paper trading only).
 
-Fast loop (every 5 min, no AI):
+Fast loop (configurable interval, default 5 min, no AI):
   - Fetch new candles via Yahoo Finance
   - Compute indicators
-  - Check thresholds + 60-min timer + cooldown
+  - Check thresholds + timer + cooldown
   - Trigger AI pipeline for flagged tickers
 
 Event-triggered AI (per flagged ticker):
-  - Multi-agent orchestration via grok-4.20-multi-agent-0309
-    (technical_analyst, social_analyst, risk_manager sub-agents dispatched
-     internally; final decision synthesised by the orchestrator in one call)
+  - Manually orchestrated multi-agent pipeline:
+    technical, social, risk agents run in parallel,
+    then a decision agent synthesises all three outputs.
   - Log to Supabase + simulate trade in DB
 
 All trades are paper-simulated (DB-tracked only). No real orders are ever submitted.
@@ -136,6 +136,36 @@ async def execute_trade(ticker_row: dict, decision: dict, current_price: float) 
     if volume <= 0:
         return {"error": "zero volume computed"}
 
+    # Hard guards: block entries that violate position/size/leverage/cash limits
+    if action in ("buy", "short"):
+        settings = db.get_settings()
+        paper_capital = settings.get("paper_capital", 1000.0)
+        all_open = db.get_all_open_positions()
+
+        # Guard: clamp size_usd to operator limits
+        max_pct_usd  = paper_capital * settings.get("max_position_pct", 20) / 100
+        max_hard_usd = settings.get("max_position_usd") or max_pct_usd
+        size_cap     = min(max_pct_usd, max_hard_usd)
+        if size_usd > size_cap:
+            size_usd = round(size_cap, 2)
+            volume = round(size_usd / current_price, 4) if current_price else 0
+
+        # Guard: clamp leverage to operator limit
+        max_lev = settings.get("max_leverage", 3)
+        if leverage > max_lev:
+            leverage = max_lev
+
+        # Guard: insufficient cash
+        used_margin = sum(
+            ((p.get("entry_price") or 0) * (p.get("quantity") or 0)) / max(p.get("leverage") or 1, 1)
+            for p in all_open
+        )
+        realized = db.get_realized_pnl()
+        available_cash = paper_capital - used_margin + realized
+        required_margin = size_usd / max(leverage, 1)
+        if required_margin > available_cash:
+            return {"error": f"insufficient cash — need ${required_margin:,.0f}, have ${available_cash:,.0f}"}
+
     result = {
         "simulated": True,
         "action":    action,
@@ -164,12 +194,12 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
     # Stamp last_ai_run + set cooldown immediately — prevents re-triggering
     # if the next poll cycle starts while this slow LLM pipeline is still running.
     db.stamp_ai_run_started(ticker)
-    db.set_cooldown(ticker, "", COOLDOWN_MIN)
+    db.set_cooldown(ticker, COOLDOWN_MIN)
     update_ticker_state(ticker, stage="context_fetch")
 
     # Fetch non-social context in parallel — X data is fetched by the social agent itself
     # current_price may already be passed in from _process_one_ticker to avoid redundant CLI calls
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     fetches = {
         "open_position":    loop.run_in_executor(None, lambda: db.get_open_position(ticker)),
         "settings":         loop.run_in_executor(None, db.get_settings),
@@ -191,62 +221,18 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
 
     # Build portfolio summary for decision + risk agents
     paper_capital = settings.get("paper_capital", 1000.0)
-    _used_margin = sum(
-        ((p["entry_price"] or 0) * (p["quantity"] or 0)) / max(p.get("leverage") or 1, 1)
-        for p in all_open_positions
+    portfolio_summary = db.build_portfolio_summary(
+        paper_capital=paper_capital,
+        all_open_positions=all_open_positions,
+        realized_pnl=realized_pnl,
+        current_ticker=ticker,
+        current_price=current_price,
     )
-    _available_cash = paper_capital - _used_margin + realized_pnl
-    _unrealized_pnl = 0.0
-    if current_price and all_open_positions:
-        for p in all_open_positions:
-            ep  = p.get("entry_price") or 0
-            qty = p.get("quantity") or 0
-            lev = p.get("leverage") or 1
-            s   = p.get("side", "long")
-            if ep:
-                # For the current ticker, use current_price; others use entry as estimate
-                cp  = current_price if p.get("ticker") == ticker else ep
-                raw = ((cp - ep) * qty * lev) if s == "long" else ((ep - cp) * qty * lev)
-                accrued_margin = db.calc_margin_cost(ep * qty, lev, p.get("opened_at"))
-                _unrealized_pnl += raw - accrued_margin
-    _account_equity = paper_capital + realized_pnl + _unrealized_pnl
-    portfolio_summary = {
-        "starting_capital":   paper_capital,
-        "realized_pnl":       round(realized_pnl, 2),
-        "unrealized_pnl":     round(_unrealized_pnl, 2),
-        "account_equity":     round(_account_equity, 2),
-        "open_position_count": len(all_open_positions),
-        "available_cash":     round(_available_cash, 2),
-        "drawdown_pct":       round((_account_equity - paper_capital) / paper_capital * 100, 2) if paper_capital else 0,
-    }
 
     # Enrich open_position with P&L + time-in-trade before passing to orchestrator
     enriched_position = None
     if open_position and current_price:
-        ep   = open_position.get("entry_price") or 0
-        side = open_position.get("side", "long")
-        qty  = open_position.get("quantity") or 0
-        lev  = open_position.get("leverage") or 1
-        raw_usd        = ((current_price - ep) * qty * lev) if side == "long" else ((ep - current_price) * qty * lev)
-        accrued_margin = db.calc_margin_cost(ep * qty, lev, open_position.get("opened_at"))
-        net_usd        = round(raw_usd - accrued_margin, 2)
-        margin_capital = ep * qty
-        signed_pct     = round(net_usd / margin_capital * 100, 2) if margin_capital else 0.0
-        opened_at_str  = open_position.get("opened_at")
-        hrs_open       = None
-        if opened_at_str:
-            try:
-                from datetime import timezone as _tz
-                opened_dt = datetime.fromisoformat(opened_at_str.replace("Z", "+00:00"))
-                hrs_open  = round((datetime.now(_tz.utc) - opened_dt).total_seconds() / 3600, 1)
-            except Exception:
-                pass
-        enriched_position = {
-            **open_position,
-            "unrealized_pnl_pct": signed_pct,
-            "unrealized_pnl_usd": net_usd,
-            "time_in_trade_hrs":  hrs_open,
-        }
+        enriched_position = db.enrich_position(open_position, current_price)
 
     # Build unified context — orchestrator dispatches technical_analyst, social_analyst,
     # risk_manager sub-agents internally via the multi-agent model.
@@ -404,7 +390,7 @@ async def process_ticker(ticker_row: dict, flags: list[str], all_indicators: dic
 
     # Persist signal state + set cooldown
     db.update_signal_state(ticker, decision, trigger_label)
-    db.set_cooldown(ticker, "", COOLDOWN_MIN)
+    db.set_cooldown(ticker, COOLDOWN_MIN)
     update_ticker_state(ticker, status="done", stage="complete",
                         last_action=action,
                         last_confidence=decision.get("confidence"),
@@ -440,7 +426,7 @@ async def _process_one_ticker(ticker_row: dict) -> None:
     """Per-ticker work for one fast-loop cycle: candles → indicators → stop-loss → AI trigger."""
     ticker      = ticker_row["ticker"]
     asset_class = ticker_row.get("asset_class", "stock")
-    loop        = asyncio.get_event_loop()
+    loop        = asyncio.get_running_loop()
     import time as _time
     update_ticker_state(ticker, status="running", stage="candles", flags=[], started_at=_time.time())
     try:
@@ -546,7 +532,7 @@ async def _process_one_ticker(ticker_row: dict) -> None:
         # 7. Fetch last AI run + cooldown state
         last_ai, on_cooldown = await asyncio.gather(
             loop.run_in_executor(None, lambda: db.get_last_ai_run(ticker)),
-            loop.run_in_executor(None, lambda: db.check_cooldown(ticker, "", COOLDOWN_MIN)),
+            loop.run_in_executor(None, lambda: db.check_cooldown(ticker)),
         )
 
         timer_expired = (
@@ -590,6 +576,12 @@ async def fast_loop() -> None:
     print(f"[bot] Starting — mode={mode_label}  poll={POLL_INTERVAL_SEC}s  ai_timer={AI_TIMER_MIN}min  cooldown={COOLDOWN_MIN}min")
 
     while True:
+        # Refresh timing settings each cycle so UI changes take effect
+        settings = db.get_settings()
+        POLL_INTERVAL_SEC = int(settings.get("poll_interval_sec", 300))
+        AI_TIMER_MIN      = int(settings.get("ai_timer_min",      60))
+        COOLDOWN_MIN      = int(settings.get("cooldown_min",      30))
+
         import time as _time
         _cycle_start_ts = _time.time()
         update_cycle_state(

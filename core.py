@@ -140,12 +140,12 @@ def run_analyst(system_prompt: str, context: dict, model: str = MODEL) -> dict:
 async def run_analyst_async(system_prompt: str, context: dict, model: str = MODEL) -> dict:
     """Async wrapper — runs run_analyst in a thread so asyncio.gather works."""
     import asyncio
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: run_analyst(system_prompt, context, model))
 
 
 # ---------------------------------------------------------------------------
-# Multi-agent orchestrated decision (grok-4.20-multi-agent-0309)
+# Multi-agent orchestrated decision (manual pipeline: parallel specialists → decision)
 # ---------------------------------------------------------------------------
 
 async def run_orchestrated_decision(context: dict, settings: dict, on_progress=None) -> dict:
