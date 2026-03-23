@@ -3,7 +3,7 @@ fetch.py — Incremental candle fetching via Yahoo Finance.
 Fetches only new candles since the last stored timestamp.
 """
 
-from datetime import datetime, timezone
+import math
 from typing import Optional
 
 import db
@@ -48,20 +48,29 @@ def fetch_yahoo_candles(symbol: str, timeframe: str, since_ts: Optional[str] = N
         )
 
     rows = []
+    skipped_rows = 0
     for ts, row in hist.iterrows():
         ts_str = ts.isoformat()
         if since_ts and ts_str <= since_ts:
             continue
-        rows.append({
-            "ticker": symbol,
-            "timeframe": timeframe,
-            "ts": ts_str,
+        values = {
             "open": float(row["Open"]),
             "high": float(row["High"]),
             "low": float(row["Low"]),
             "close": float(row["Close"]),
             "volume": float(row["Volume"]),
+        }
+        if not all(math.isfinite(value) for value in values.values()):
+            skipped_rows += 1
+            continue
+        rows.append({
+            "ticker": symbol,
+            "timeframe": timeframe,
+            "ts": ts_str,
+            **values,
         })
+    if skipped_rows:
+        print(f"  [fetch] {symbol} {timeframe}: skipped {skipped_rows} Yahoo rows with non-finite OHLCV")
     return rows
 
 

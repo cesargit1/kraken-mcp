@@ -4,7 +4,9 @@ Requires SUPABASE_URL and SUPABASE_KEY in .env
 """
 
 import os
+import math
 from datetime import datetime, timezone
+from numbers import Integral, Real
 from typing import Optional
 
 from supabase import create_client, Client
@@ -13,6 +15,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _client: Optional[Client] = None
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    return value
 
 
 def get_client() -> Client:
@@ -66,7 +83,15 @@ def get_watchlist() -> list[dict]:
 
 def upsert_candles(rows: list[dict]) -> None:
     if rows:
-        _exec(lambda: get_client().table("candles").upsert(rows, on_conflict="ticker,timeframe,ts").execute())
+        clean_rows = []
+        for row in rows:
+            clean_row = _json_safe(row)
+            required = (clean_row.get("open"), clean_row.get("high"), clean_row.get("low"), clean_row.get("close"), clean_row.get("volume"))
+            if any(value is None for value in required):
+                continue
+            clean_rows.append(clean_row)
+        if clean_rows:
+            _exec(lambda: get_client().table("candles").upsert(clean_rows, on_conflict="ticker,timeframe,ts").execute())
 
 
 def get_candle_window(ticker: str, timeframe: str, limit: int = 100) -> list[dict]:
@@ -103,7 +128,7 @@ def get_latest_candle_ts(ticker: str, timeframe: str) -> Optional[str]:
 _EPHEMERAL_INDICATOR_KEYS = {"latest_close", "latest_open", "latest_high", "latest_low", "latest_volume"}
 
 def upsert_indicators(row: dict) -> None:
-    db_row = {k: v for k, v in row.items() if k not in _EPHEMERAL_INDICATOR_KEYS}
+    db_row = _json_safe({k: v for k, v in row.items() if k not in _EPHEMERAL_INDICATOR_KEYS})
     _exec(lambda: get_client().table("indicators").upsert(db_row, on_conflict="ticker,timeframe,ts").execute())
 
 
@@ -119,24 +144,24 @@ def get_signal_state(ticker: str) -> Optional[dict]:
 def stamp_ai_run_started(ticker: str) -> None:
     """Write last_ai_run NOW so a crash mid-pipeline won't re-trigger on restart."""
     get_client().table("signal_state").upsert(
-        {
+        _json_safe({
             "ticker": ticker,
             "last_ai_run": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
+        }),
         on_conflict="ticker",
     ).execute()
 
 
 def update_signal_state(ticker: str, signal: dict, event_type: str) -> None:
     get_client().table("signal_state").upsert(
-        {
+        _json_safe({
             "ticker": ticker,
             "last_signal": signal,
             "last_event_type": event_type,
             "last_ai_run": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
+        }),
         on_conflict="ticker",
     ).execute()
 
@@ -172,11 +197,11 @@ def set_cooldown(ticker: str, window_minutes: int = 30) -> None:
     from datetime import timedelta
     until = (datetime.now(timezone.utc) + timedelta(minutes=window_minutes)).isoformat()
     get_client().table("signal_state").upsert(
-        {
+        _json_safe({
             "ticker": ticker,
             "cooldown_until": until,
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
+        }),
         on_conflict="ticker",
     ).execute()
 
@@ -199,7 +224,7 @@ def log_agent_run(
     decision_json: Optional[dict] = None,
     pair: Optional[str] = None,  # deprecated — ignored, kept for call-site compat
 ) -> int:
-    payload = {
+    payload = _json_safe({
         "ticker": ticker,
         "action": action,
         "trigger_flags": trigger_flags,
@@ -211,7 +236,7 @@ def log_agent_run(
         "position_side": position_side,
         "indicators_snapshot": indicators_snapshot,
         "executed": executed,
-    }
+    })
     try:
         r = get_client().table("agent_log").insert(payload).execute()
     except Exception:
